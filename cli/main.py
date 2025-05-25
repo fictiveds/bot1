@@ -5,7 +5,7 @@ import numpy as np
 from pydub import AudioSegment # Хотя бы для type hinting, если понадобится
 
 # Импорты из созданных модулей
-from composer.composition import create_experimental_composition, get_random_params
+from composer.composition import create_experimental_composition, get_random_params # noqa
 from audio_engine.pydub_utils import ( # noqa
     get_sine_segment, get_square_segment, get_sawtooth_segment, get_noise_segment, # noqa
     apply_delay_to_segment, apply_filter_to_segment, apply_reverb_to_segment, # noqa
@@ -13,7 +13,7 @@ from audio_engine.pydub_utils import ( # noqa
 )
 from utils.constants import SAMPLE_RATE
 from nodal_engine.graph import SoundGraph
-from nodal_engine.modules import SineOscillator, LFO
+from nodal_engine.modules import SineOscillator, LFO, ADSREnvelope, SignalScalerOffset
 
 
 def main():
@@ -48,69 +48,107 @@ def main():
     np.random.seed(current_seed)
 
     if args.nodal_example:
-        print(f"Генерация примера нодального звука в файл: {args.nodal_example}")
+        print(f"Генерация сложного примера нодального звука в файл: {args.nodal_example}")
         try:
             # 1. Создаем граф
             graph = SoundGraph()
+            sample_rate = SAMPLE_RATE # Используем глобальную константу
 
             # 2. Создаем модули
-            # LFO будет модулировать амплитуду синусоиды.
-            # LFO генерирует сигнал в диапазоне [-amplitude, +amplitude].
-            # Для модуляции амплитуды синусоиды (которая обычно 0.0-1.0) нам нужно,
-            # чтобы LFO выдавал значения, например, от 0.0 до 1.0 (или 0.0 до 0.5 для меньшей громкости).
-            # Если LFO.amplitude = 0.5, он дает [-0.5, +0.5]. Если прибавить 0.5, получим [0.0, 1.0].
-            # Это можно сделать, если LFO имеет параметр 'offset' или если есть модуль Adder.
-            # Пока что LFO будет модулировать амплитуду "как есть", что может привести к инверсии фазы.
-            # Для более контролируемого эффекта тремоло, выход LFO должен быть смещен и масштабирован.
+            # LFO для модуляции частоты
+            # Генерирует сигнал от -1 до 1 с частотой 0.5 Гц
+            lfo_freq_mod = LFO(name="lfo_freq_mod", frequency=0.5, amplitude=1.0) 
             
-            # Пример: LFO для амплитуды, создающий тремоло.
-            # LFO генерирует значения от -0.4 до +0.4.
-            # Если мы хотим, чтобы амплитуда основного звука менялась, например, от 0.1 до 0.9,
-            # то (LFO_output + 1) * 0.4 + 0.1 -> ([-0.4, 0.4] + 1) * 0.4 + 0.1 -> [0.6, 1.4]*0.4 +0.1 -> [0.24, 0.56] + 0.1 -> [0.34, 0.66]
-            # Это потребует модулей смещения и масштабирования.
-            # В данном примере мы просто подключим LFO напрямую, что приведет к модуляции амплитуды
-            # синусоиды значениями LFO. Если амплитуда LFO 0.5, то выход синусоиды будет исходная_волна * [-0.5, 0.5].
-            # Это не совсем то, что нужно для простого тремоло, но демонстрирует подключение.
-            # Чтобы сделать эффект тремоло, где амплитуда меняется, скажем, от 0 (тишина) до 0.5 (макс. громкость LFO),
-            # LFO должен генерировать сигнал в диапазоне [0, 1] (или [0, X]), а затем этот сигнал умножается на желаемую амплитуду.
-            # (LFO_sine(-1..1) + 1) / 2 -> [0..1]
-            # Для этого LFO должен быть способен настраивать свой выходной диапазон или нужен модуль Scale/Offset.
-            # Пока оставим как есть: LFO модулирует амплитуду синусоиды.
-            
-            lfo_for_amp = LFO(name="amp_lfo", frequency=2.0, amplitude=0.5) # Генерирует значения от -0.5 до +0.5
-            # Базовая амплитуда синусоиды будет 0.5.
-            # Выход LFO будет использоваться для модуляции этой базовой амплитуды.
-            # Фактически, значение с LFO (от -0.5 до +0.5) будет само по себе новой амплитудой.
-            # Это не совсем модуляция, а прямое управление амплитудой через LFO.
-            # Для истинной амплитудной модуляции (AM), нужно: out = carrier * (1 + modulator) или carrier * modulator
-            # В нашем случае, get_input_value для 'amplitude' просто заменит self._amplitude.
-            
-            sine_osc = SineOscillator(name="sine1", frequency=220.0, amplitude=0.0) # Начальная амплитуда 0, будет полностью управляться LFO
+            # Scaler/Offset для преобразования выхода LFO в диапазон частот
+            # Базовая частота осциллятора будет 330 Гц.
+            # LFO (-1 до 1) * 110 => -110 до 110 Гц (диапазон модуляции)
+            # (LFO * 110) + 330 => от 220 Гц до 440 Гц
+            freq_scaler = SignalScalerOffset(name="freq_scaler", scale=110.0, offset=330.0)
+
+            # Осциллятор
+            sine_osc = SineOscillator(name="sine_osc", frequency=330.0, amplitude=0.0) # Амплитуда будет управляться ADSR
+
+            # ADSR огибающая для общей громкости
+            # Attack: 0.1s, Decay: 0.2s, Sustain: 0.6, Release: 0.5s
+            adsr_amp_env = ADSREnvelope(name="adsr_amp_env", 
+                                        attack_time_sec=0.1, 
+                                        decay_time_sec=0.2, 
+                                        sustain_level=0.6, 
+                                        release_time_sec=0.5)
 
             # 3. Добавляем модули в граф
-            graph.add_module(lfo_for_amp)
+            graph.add_module(lfo_freq_mod)
+            graph.add_module(freq_scaler)
             graph.add_module(sine_osc)
+            graph.add_module(adsr_amp_env)
 
-            # 4. Соединяем: выход 'value' LFO к входу 'amplitude' осциллятора
-            graph.connect(source_module_name="amp_lfo", source_output_name="value",
-                          target_module_name="sine1", target_input_name="amplitude")
+            # 4. Соединяем модули
+            # LFO -> Scaler (для частоты)
+            graph.connect(source_module_name="lfo_freq_mod", source_output_name="value",
+                          target_module_name="freq_scaler", target_input_name="input_signal")
+            
+            # Scaler -> Частота Осциллятора
+            graph.connect(source_module_name="freq_scaler", source_output_name="value",
+                          target_module_name="sine_osc", target_input_name="frequency")
+
+            # ADSR -> Амплитуда Осциллятора
+            graph.connect(source_module_name="adsr_amp_env", source_output_name="value",
+                          target_module_name="sine_osc", target_input_name="amplitude")
 
             # 5. Устанавливаем мастер-выход
-            graph.set_master_output("sine1")
+            graph.set_master_output("sine_osc")
 
-            # 6. Рендерим аудио
-            duration = 5.0  # секунд
-            output_audio_segment = graph.render_audio(duration, SAMPLE_RATE)
+            # 6. Триггеры для ADSR
+            # Мы хотим, чтобы звук проиграл один раз на заданной длительности.
+            # Для этого нужно будет как-то управлять trigger_on/trigger_off ADSR из графа
+            # или передавать информацию о времени в ADSR.
+            # Самый простой способ для этого примера: вызвать trigger_on() перед рендерингом,
+            # и trigger_off() после определенного времени, если длительность рендера больше.
+            # Однако, render_audio() сам по себе не имеет такой логики.
+            #
+            # ВАРИАНТ ДЛЯ ПРОСТОТЫ ПРИМЕРА:
+            # Мы отрендерим звук чуть дольше, чем нужно для атаки-спада-сустейна,
+            # и вызовем trigger_off до начала рендера той части, где должен быть release.
+            # Это не идеально, но для демонстрации подойдет.
+            # Более правильно было бы иметь модуль "Gate Sequencer" или передавать массив "гейт" сигналов в ADSR.
+            
+            duration = 3.0  # Общая длительность рендера в секундах
+            
+            # Запускаем ADSR в самом начале
+            adsr_amp_env.trigger_on()
+            
+            # Мы не можем вызвать trigger_off() динамически во время рендера без изменений в SoundGraph.
+            # Поэтому ADSR останется в Sustain фазе до конца, если gate_is_on=True.
+            # Если мы хотим услышать Release, нам нужно установить gate_is_on=False в какой-то момент.
+            # Для этого примера ADSR будет просто идти до Sustain и оставаться там,
+            # так как trigger_off() не вызывается динамически во время рендеринга графа.
+            # Чтобы услышать release, нужно было бы рендерить дольше и вызвать trigger_off()
+            # *перед* вызовом render_audio() для той части, где ожидается release, что неудобно.
+            #
+            # Давайте сделаем так: ADSR будет активен (sustain) почти всю длительность,
+            # а потом быстро затухнет. Мы можем имитировать это, установив очень короткое время release
+            # и вызвав trigger_off() для ADSR *после* основного рендера, если бы мы рендерили по частям.
+            #
+            # Поскольку render_audio цельный, ADSR просто пройдет A-D-S. Если gate_is_on останется True,
+            # он не войдет в Release. Если мы вызовем trigger_off() перед render_audio, то он сразу пойдет в Release.
+            #
+            # Для этого примера, чтобы ADSR отработала свой цикл (хотя бы ADS),
+            # мы оставим adsr_amp_env.trigger_on(). Звук просто оборвется в конце sustain.
+            # Чтобы был релиз, нужна более сложная логика управления gate.
 
-            # 7. Сохраняем результат
+            print(f"Параметры ADSR: A={adsr_amp_env.attack_time_sec}s, D={adsr_amp_env.decay_time_sec}s, S={adsr_amp_env.sustain_level}, R={adsr_amp_env.release_time_sec}s")
+
+            # 7. Рендерим аудио
+            output_audio_segment = graph.render_audio(duration, sample_rate)
+
+            # 8. Сохраняем результат
             output_audio_segment.export(args.nodal_example, format="wav")
-            print(f"Нодальный пример сохранен в: {args.nodal_example}")
+            print(f"Нодальный пример (ADSR + LFO->Freq) сохранен в: {args.nodal_example}")
 
         except Exception as e:
             print(f"Ошибка при генерации нодального примера: {e}")
             import traceback
             traceback.print_exc()
-
     elif args.single_sound_file:
         print(f"Генерация одного случайного звука в файл: {args.single_sound_file}")
         

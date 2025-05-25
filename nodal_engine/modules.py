@@ -1,12 +1,21 @@
 # nodal_engine/modules.py
 import numpy as np
 import math # для pi
+from enum import Enum, auto # Добавлено для EnvelopeState
 from .core import AudioModule, ControlModule 
 from audio_engine.waveforms import generate_sine_wave, generate_square_wave, generate_sawtooth_wave, generate_noise_wave
 from audio_engine.effects import apply_delay, apply_filter, apply_reverb 
 from audio_engine.pydub_utils import _numpy_to_segment, _segment_to_numpy, apply_simplified_granular_effect as pydub_granular_effect
 from pydub import AudioSegment 
 # from utils.constants import SAMPLE_RATE
+
+class EnvelopeState(Enum):
+    """Состояния ADSR-огибающей."""
+    IDLE = auto()
+    ATTACK = auto()
+    DECAY = auto()
+    SUSTAIN = auto()
+    RELEASE = auto()
 
 class SineOscillator(AudioModule):
     """Осциллятор, генерирующий синусоидальную волну."""
@@ -579,3 +588,229 @@ class LFO(ControlModule):
         self._current_phase_rad = current_phase % (2 * math.pi) # Сохраняем и нормализуем фазу для следующего блока
 
         self.outputs['value'] = output_block
+
+# --- Класс ADSR Envelope ---
+class ADSREnvelope(ControlModule):
+    """
+    Генерирует ADSR-огибающую (Attack, Decay, Sustain, Release).
+    Управляется через методы trigger_on() и trigger_off().
+    Выходной сигнал ('value') находится в диапазоне от 0.0 до 1.0.
+    """
+    def __init__(self, name: str, 
+                 attack_time_sec: float = 0.1, 
+                 decay_time_sec: float = 0.1, 
+                 sustain_level: float = 0.7, 
+                 release_time_sec: float = 0.5):
+        """
+        Инициализирует ADSR-огибающую.
+
+        Args:
+            name (str): Имя модуля.
+            attack_time_sec (float, optional): Время атаки в секундах. Defaults to 0.1.
+            decay_time_sec (float, optional): Время спада в секундах. Defaults to 0.1.
+            sustain_level (float, optional): Уровень поддержки (0.0 до 1.0). Defaults to 0.7.
+            release_time_sec (float, optional): Время затухания в секундах. Defaults to 0.5.
+        """
+        super().__init__(name)
+        
+        self.attack_time_sec = max(0.001, attack_time_sec) 
+        self.decay_time_sec = max(0.001, decay_time_sec)
+        self.sustain_level = np.clip(sustain_level, 0.0, 1.0)
+        self.release_time_sec = max(0.001, release_time_sec)
+
+        self._state = EnvelopeState.IDLE
+        self._current_level = 0.0
+        self._gate_is_on = False 
+
+        self.outputs['value'] = np.zeros(0, dtype=np.float32)
+
+    @property
+    def attack_time(self) -> float: 
+        """Время атаки в секундах."""
+        return self.attack_time_sec
+    @attack_time.setter
+    def attack_time(self, value: float): self.attack_time_sec = max(0.001, value)
+
+    @property
+    def decay_time(self) -> float: 
+        """Время спада до уровня поддержки в секундах."""
+        return self.decay_time_sec
+    @decay_time.setter
+    def decay_time(self, value: float): self.decay_time_sec = max(0.001, value)
+
+    @property
+    def sustain(self) -> float: 
+        """Уровень поддержки (0.0 до 1.0)."""
+        return self.sustain_level
+    @sustain.setter
+    def sustain(self, value: float): self.sustain_level = np.clip(value, 0.0, 1.0)
+    
+    @property
+    def release_time(self) -> float: 
+        """Время затухания (после отпускания клавиши) в секундах."""
+        return self.release_time_sec
+    @release_time.setter
+    def release_time(self, value: float): self.release_time_sec = max(0.001, value)
+
+    def trigger_on(self):
+        """
+        Запускает огибающую (эквивалент нажатия клавиши).
+        Переводит огибающую в состояние ATTACK.
+        """
+        self._gate_is_on = True
+        self._state = EnvelopeState.ATTACK
+        # При re-trigger можно сбросить _current_level, если это нужно для звука.
+        # self._current_level = 0.0 # Опционально, для "жесткого" перезапуска атаки
+
+    def trigger_off(self):
+        """
+        Инициирует фазу затухания Release (эквивалент отпускания клавиши).
+        Переводит огибающую в состояние RELEASE, если она не в IDLE.
+        """
+        self._gate_is_on = False
+        if self._state != EnvelopeState.IDLE:
+             self._state = EnvelopeState.RELEASE
+
+    def process_block(self, num_samples: int, sample_rate: int):
+        """
+        Генерирует блок значений огибающей ADSR.
+        Каждый сэмпл в блоке рассчитывается в соответствии с текущим состоянием
+        огибающей (ATTACK, DECAY, SUSTAIN, RELEASE, IDLE) и ее параметрами.
+        """
+        output_block = np.zeros(num_samples, dtype=np.float32)
+        
+        # TODO: Параметры A, D, S, R могут быть модулируемыми через входы.
+        # Пока используются значения из свойств.
+
+        for i in range(num_samples):
+            if self._state == EnvelopeState.IDLE:
+                self._current_level = 0.0
+            
+            elif self._state == EnvelopeState.ATTACK:
+                attack_samples = self.attack_time_sec * sample_rate
+                if attack_samples == 0:
+                    self._current_level = 1.0
+                else:
+                    # Линейный рост от текущего уровня до 1.0
+                    # Если _current_level = 0, increment = 1.0 / attack_samples
+                    increment = (1.0 - self._current_level) / (attack_samples * (1.0 - self._current_level + 1e-9) + 1e-9) # Более общий случай
+                    # Упрощенный, если атака всегда с нуля или почти с нуля:
+                    # increment = 1.0 / (attack_samples + 1e-9) 
+                    self._current_level += increment
+                
+                if self._current_level >= 1.0:
+                    self._current_level = 1.0
+                    self._state = EnvelopeState.DECAY
+            
+            elif self._state == EnvelopeState.DECAY:
+                decay_samples = self.decay_time_sec * sample_rate
+                if decay_samples == 0:
+                    self._current_level = self.sustain_level
+                else:
+                    if self._current_level > self.sustain_level:
+                        # Линейный спад от текущего уровня до sustain_level
+                        decrement = (self._current_level - self.sustain_level) / (decay_samples + 1e-9)
+                        self._current_level -= decrement
+                    else: # Если уже ниже или равен sustain (например, из-за очень короткой атаки)
+                        self._current_level = self.sustain_level
+
+                if self._current_level <= self.sustain_level:
+                    self._current_level = self.sustain_level
+                    self._state = EnvelopeState.SUSTAIN
+            
+            elif self._state == EnvelopeState.SUSTAIN:
+                self._current_level = self.sustain_level
+                if not self._gate_is_on: 
+                    self._state = EnvelopeState.RELEASE
+            
+            elif self._state == EnvelopeState.RELEASE:
+                release_samples = self.release_time_sec * sample_rate
+                if release_samples == 0:
+                    self._current_level = 0.0
+                else:
+                    # Линейный спад от текущего уровня до 0.0
+                    decrement = self._current_level / (release_samples + 1e-9)
+                    self._current_level -= decrement
+
+                if self._current_level <= 0.0:
+                    self._current_level = 0.0
+                    self._state = EnvelopeState.IDLE
+            
+            output_block[i] = self._current_level
+        
+        self.outputs['value'] = output_block.astype(np.float32)
+
+# --- Класс SignalScalerOffset ---
+class SignalScalerOffset(ControlModule):
+    """
+    Масштабирует и смещает входной управляющий сигнал.
+    Формула: Output = (Input * Scale) + Offset.
+    """
+    def __init__(self, name: str, scale: float = 1.0, offset: float = 0.0):
+        """
+        Инициализирует модуль масштабирования и смещения сигнала.
+
+        Args:
+            name (str): Имя модуля.
+            scale (float, optional): Коэффициент масштабирования. Defaults to 1.0.
+            offset (float, optional): Значение смещения. Defaults to 0.0.
+        """
+        super().__init__(name)
+        self._scale = scale
+        self._offset = offset
+        # self.inputs['input_signal'] будет использоваться по соглашению для основного входа
+        # self.inputs['scale_in'] и self.inputs['offset_in'] - возможные будущие входы для модуляции scale/offset
+        
+        self.outputs['value'] = np.zeros(0, dtype=np.float32) # Выходной сигнал
+
+    @property
+    def scale(self) -> float:
+        """Коэффициент масштабирования, применяемый к входному сигналу."""
+        return self._scale
+
+    @scale.setter
+    def scale(self, value: float):
+        self._scale = float(value)
+
+    @property
+    def offset(self) -> float:
+        """Значение смещения, добавляемое к масштабированному сигналу."""
+        return self._offset
+
+    @offset.setter
+    def offset(self, value: float):
+        self._offset = float(value)
+
+    def process_block(self, num_samples: int, sample_rate: int):
+        """
+        Обрабатывает блок, применяя масштабирование и смещение к входному сигналу ('input_signal').
+        Параметры 'scale' и 'offset' пока берутся из свойств, но в будущем могут управляться через входы.
+        """
+        # Получаем входной сигнал
+        # Если к 'input_signal' ничего не подключено, он будет блоком нулей (или другого default_value из get_input_value)
+        input_block = self.get_input_value('input_signal', num_samples, sample_rate, default_value=0.0)
+        
+        # Параметры scale и offset пока берутся из свойств.
+        # В будущем их тоже можно сделать управляемыми через входы:
+        # current_scale = self.get_input_value('scale_in', num_samples, sample_rate, default_value=self._scale)
+        # current_offset = self.get_input_value('offset_in', num_samples, sample_rate, default_value=self._offset)
+        current_scale = self._scale
+        current_offset = self._offset
+
+        # Убедимся, что input_block является NumPy массивом для операций
+        if not isinstance(input_block, np.ndarray):
+            input_block = np.full(num_samples, float(input_block))
+        elif input_block.size == 1 and num_samples > 1 : # Если input_block - скаляр в массиве
+            input_block = np.full(num_samples, input_block.item())
+        elif input_block.size != num_samples:
+            # Если размеры не совпадают, это проблема. Пока заполним значением по умолчанию (или первым элементом).
+            # print(f"Предупреждение (SignalScalerOffset {self.name}): размер входного блока {input_block.size} не совпадает с num_samples {num_samples}")
+            default_fill_value = input_block[0] if input_block.size > 0 else 0.0
+            input_block = np.full(num_samples, default_fill_value)
+
+
+        # Выполняем операцию
+        output_block = (input_block * current_scale) + current_offset
+        
+        self.outputs['value'] = output_block.astype(np.float32)
+```
