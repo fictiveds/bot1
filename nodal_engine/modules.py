@@ -813,4 +813,4 @@ class SignalScalerOffset(ControlModule):
         output_block = (input_block * current_scale) + current_offset
         
         self.outputs['value'] = output_block.astype(np.float32)
-```
+
