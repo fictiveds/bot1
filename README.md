@@ -34,7 +34,7 @@
 
 ## Использование
 
-Скрипт запускается из командной строки.
+Скрипт запускается из командной строки. Убедитесь, что вы находитесь в корневой директории проекта (`experimental_sound_generator`).
 
 **Основные аргументы:**
 
@@ -48,33 +48,39 @@
 
 1.  **Сгенерировать композицию по умолчанию (30 секунд, 5 слоев) и сохранить в `experimental_music.wav`:**
     ```bash
-    python sound_generator.py
+    python -m cli.main
     ```
 
 2.  **Сгенерировать 60-секундную композицию с 10 слоями и сохранить в `my_composition.wav`:**
     ```bash
-    python sound_generator.py -o my_composition.wav -d 60 -l 10
+    python -m cli.main -o my_composition.wav -d 60 -l 10
     ```
 
 3.  **Сгенерировать композицию с использованием определенного зерна для случайности:**
     ```bash
-    python sound_generator.py --seed 42
+    python -m cli.main --seed 42
     ```
 
 4.  **Сгенерировать один случайный звук и сохранить его в `random_sound.wav`:**
     ```bash
-    python sound_generator.py -s random_sound.wav
+    python -m cli.main -s random_sound.wav
     ```
 
 ## Структура кода
 
-Основная логика находится в файле `sound_generator.py`. Ключевые компоненты:
+Проект имеет следующую структуру:
 
-*   Функции генерации волн (`generate_sine_wave`, и т.д.).
-*   Функции применения эффектов (`apply_delay`, `apply_filter`, и т.д.) и их обертки для `AudioSegment`.
-*   Функции для работы с `AudioSegment` (`get_sine_segment`, `apply_delay_to_segment`, и т.д.).
-*   Функция `create_experimental_composition` для создания сложных композиций.
-*   Парсинг аргументов CLI в блоке `if __name__ == "__main__":`.
+*   **`experimental_sound_generator/`**: Корневая папка.
+    *   **`cli/main.py`**: Точка входа приложения, обработка аргументов командной строки.
+    *   **`composer/composition.py`**: Логика создания музыкальных композиций.
+    *   **`audio_engine/`**: Пакет для низкоуровневых операций со звуком.
+        *   `waveforms.py`: Генерация базовых звуковых волн (NumPy).
+        *   `effects.py`: Реализация аудиоэффектов (NumPy).
+        *   `pydub_utils.py`: Утилиты для работы с `pydub`, конвертация и обертки для `AudioSegment`.
+    *   **`utils/constants.py`**: Общие константы (например, `SAMPLE_RATE`).
+    *   `requirements.txt`: Список зависимостей.
+    *   `README.md`: Этот файл.
+    *   `.gitignore`: Файл для исключения ненужных файлов из Git.
 
 ## Лицензия
 
