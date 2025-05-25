@@ -13,7 +13,8 @@ from audio_engine.pydub_utils import ( # noqa
 )
 from utils.constants import SAMPLE_RATE
 from nodal_engine.graph import SoundGraph
-from nodal_engine.modules import SineOscillator, LFO, ADSREnvelope, SignalScalerOffset
+from nodal_engine.modules import SineOscillator, LFO, ADSREnvelope # SignalScalerOffset убран из прямого использования в этом примере
+from nodal_engine.core import ModulationType # Важно для установки типа модуляции
 
 
 def main():
@@ -48,102 +49,72 @@ def main():
     np.random.seed(current_seed)
 
     if args.nodal_example:
-        print(f"Генерация сложного примера нодального звука в файл: {args.nodal_example}")
+        print(f"Генерация обновленного нодального примера в файл: {args.nodal_example}")
         try:
-            # 1. Создаем граф
             graph = SoundGraph()
-            sample_rate = SAMPLE_RATE # Используем глобальную константу
+            sample_rate = SAMPLE_RATE
 
-            # 2. Создаем модули
-            # LFO для модуляции частоты
-            # Генерирует сигнал от -1 до 1 с частотой 0.5 Гц
-            lfo_freq_mod = LFO(name="lfo_freq_mod", frequency=0.5, amplitude=1.0) 
+            # 1. LFO для модуляции частоты (вибрато)
+            # Генерирует сигнал, например, от -1 до 1.
+            # Мы хотим, чтобы он добавлял/вычитал до 20 Гц к базовой частоте осциллятора.
+            lfo_freq = LFO(name="lfo_for_frequency", frequency=5.0, amplitude=1.0) 
+            # scale для InputConnector частоты осциллятора сделает фактическую глубину вибрато.
+
+            # 2. ADSR для общей амплитуды
+            adsr_amp = ADSREnvelope(name="adsr_main_amp",
+                                    attack_time_sec=0.2,
+                                    decay_time_sec=0.3,
+                                    sustain_level=0.7,
+                                    release_time_sec=0.5)
+
+            # 3. Осциллятор
+            # Базовая частота 220 Гц. LFO будет ее модулировать.
+            # Базовая амплитуда 0.7 (будет полностью заменена выходом ADSR, если sustain ADSR = 0.7).
+            sine_osc = SineOscillator(name="main_oscillator") # default_value для частоты и амплитуды возьмутся из конструктора SineOscillator
             
-            # Scaler/Offset для преобразования выхода LFO в диапазон частот
-            # Базовая частота осциллятора будет 330 Гц.
-            # LFO (-1 до 1) * 110 => -110 до 110 Гц (диапазон модуляции)
-            # (LFO * 110) + 330 => от 220 Гц до 440 Гц
-            freq_scaler = SignalScalerOffset(name="freq_scaler", scale=110.0, offset=330.0)
+            # Настраиваем InputConnectors осциллятора:
+            # Частота: базовая 220 Гц, модулируется LFO аддитивно, с глубиной +/- 20 Гц.
+            sine_osc.frequency_in.default_value = np.array([220.0]) # Базовая частота
+            sine_osc.frequency_in.modulation_type = ModulationType.ADD
+            sine_osc.frequency_in.scale = 20.0  # LFO выход (-1..1) * 20 => +/- 20 Гц
+            sine_osc.frequency_in.offset = 0.0   # Смещение для LFO сигнала не нужно
 
-            # Осциллятор
-            sine_osc = SineOscillator(name="sine_osc", frequency=330.0, amplitude=0.0) # Амплитуда будет управляться ADSR
+            # Амплитуда: базовая (default_value) 0.0, полностью заменяется выходом ADSR.
+            # ADSR генерирует 0..1, scale и offset не нужны.
+            sine_osc.amplitude_in.default_value = np.array([0.0]) # Если ADSR не подключен, звука не будет
+            sine_osc.amplitude_in.modulation_type = ModulationType.REPLACE
+            # scale = 1.0, offset = 0.0 для amplitude_in уже по умолчанию в InputConnector
 
-            # ADSR огибающая для общей громкости
-            # Attack: 0.1s, Decay: 0.2s, Sustain: 0.6, Release: 0.5s
-            adsr_amp_env = ADSREnvelope(name="adsr_amp_env", 
-                                        attack_time_sec=0.1, 
-                                        decay_time_sec=0.2, 
-                                        sustain_level=0.6, 
-                                        release_time_sec=0.5)
-
-            # 3. Добавляем модули в граф
-            graph.add_module(lfo_freq_mod)
-            graph.add_module(freq_scaler)
+            # 4. Добавляем модули в граф
+            graph.add_module(lfo_freq)
+            graph.add_module(adsr_amp)
             graph.add_module(sine_osc)
-            graph.add_module(adsr_amp_env)
 
-            # 4. Соединяем модули
-            # LFO -> Scaler (для частоты)
-            graph.connect(source_module_name="lfo_freq_mod", source_output_name="value",
-                          target_module_name="freq_scaler", target_input_name="input_signal")
-            
-            # Scaler -> Частота Осциллятора
-            graph.connect(source_module_name="freq_scaler", source_output_name="value",
-                          target_module_name="sine_osc", target_input_name="frequency")
+            # 5. Соединяем модули
+            # LFO -> Частота Осциллятора
+            graph.connect(source_module_name="lfo_for_frequency", source_output_name="value",
+                          target_module_name="main_oscillator", target_input_name="frequency") # Имя 'frequency' должно совпадать с именем InputConnector в SineOscillator
 
             # ADSR -> Амплитуда Осциллятора
-            graph.connect(source_module_name="adsr_amp_env", source_output_name="value",
-                          target_module_name="sine_osc", target_input_name="amplitude")
+            graph.connect(source_module_name="adsr_main_amp", source_output_name="value",
+                          target_module_name="main_oscillator", target_input_name="amplitude") # Имя 'amplitude'
 
-            # 5. Устанавливаем мастер-выход
-            graph.set_master_output("sine_osc")
+            # 6. Устанавливаем мастер-выход
+            graph.set_master_output("main_oscillator")
 
-            # 6. Триггеры для ADSR
-            # Мы хотим, чтобы звук проиграл один раз на заданной длительности.
-            # Для этого нужно будет как-то управлять trigger_on/trigger_off ADSR из графа
-            # или передавать информацию о времени в ADSR.
-            # Самый простой способ для этого примера: вызвать trigger_on() перед рендерингом,
-            # и trigger_off() после определенного времени, если длительность рендера больше.
-            # Однако, render_audio() сам по себе не имеет такой логики.
-            #
-            # ВАРИАНТ ДЛЯ ПРОСТОТЫ ПРИМЕРА:
-            # Мы отрендерим звук чуть дольше, чем нужно для атаки-спада-сустейна,
-            # и вызовем trigger_off до начала рендера той части, где должен быть release.
-            # Это не идеально, но для демонстрации подойдет.
-            # Более правильно было бы иметь модуль "Gate Sequencer" или передавать массив "гейт" сигналов в ADSR.
-            
-            duration = 3.0  # Общая длительность рендера в секундах
-            
-            # Запускаем ADSR в самом начале
-            adsr_amp_env.trigger_on()
-            
-            # Мы не можем вызвать trigger_off() динамически во время рендера без изменений в SoundGraph.
-            # Поэтому ADSR останется в Sustain фазе до конца, если gate_is_on=True.
-            # Если мы хотим услышать Release, нам нужно установить gate_is_on=False в какой-то момент.
-            # Для этого примера ADSR будет просто идти до Sustain и оставаться там,
-            # так как trigger_off() не вызывается динамически во время рендеринга графа.
-            # Чтобы услышать release, нужно было бы рендерить дольше и вызвать trigger_off()
-            # *перед* вызовом render_audio() для той части, где ожидается release, что неудобно.
-            #
-            # Давайте сделаем так: ADSR будет активен (sustain) почти всю длительность,
-            # а потом быстро затухнет. Мы можем имитировать это, установив очень короткое время release
-            # и вызвав trigger_off() для ADSR *после* основного рендера, если бы мы рендерили по частям.
-            #
-            # Поскольку render_audio цельный, ADSR просто пройдет A-D-S. Если gate_is_on останется True,
-            # он не войдет в Release. Если мы вызовем trigger_off() перед render_audio, то он сразу пойдет в Release.
-            #
-            # Для этого примера, чтобы ADSR отработала свой цикл (хотя бы ADS),
-            # мы оставим adsr_amp_env.trigger_on(). Звук просто оборвется в конце sustain.
-            # Чтобы был релиз, нужна более сложная логика управления gate.
+            # 7. Триггер для ADSR
+            adsr_amp.trigger_on() 
+            # Чтобы услышать release, нужно было бы вызвать adsr_amp.trigger_off() 
+            # перед окончанием длительности рендера. 
+            # Пока ADSR пройдет ADS и останется на sustain, если duration достаточно длинный.
 
-            print(f"Параметры ADSR: A={adsr_amp_env.attack_time_sec}s, D={adsr_amp_env.decay_time_sec}s, S={adsr_amp_env.sustain_level}, R={adsr_amp_env.release_time_sec}s")
+            duration = 4.0  # секунд
+            print(f"Параметры осциллятора: базовая частота={sine_osc.frequency_in.default_value[0]} Гц, модуляция +/-{sine_osc.frequency_in.scale} Гц от LFO.")
+            print(f"Параметры ADSR: A={adsr_amp.attack_time_sec}s, D={adsr_amp.decay_time_sec}s, S={adsr_amp.sustain_level}, R={adsr_amp.release_time_sec}s. Амплитуда осциллятора управляется ADSR.")
 
-            # 7. Рендерим аудио
             output_audio_segment = graph.render_audio(duration, sample_rate)
-
-            # 8. Сохраняем результат
             output_audio_segment.export(args.nodal_example, format="wav")
-            print(f"Нодальный пример (ADSR + LFO->Freq) сохранен в: {args.nodal_example}")
+            print(f"Обновленный нодальный пример сохранен в: {args.nodal_example}")
 
         except Exception as e:
             print(f"Ошибка при генерации нодального примера: {e}")
