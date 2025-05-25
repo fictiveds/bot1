@@ -1,9 +1,169 @@
 # nodal_engine/core.py
 from abc import ABC, abstractmethod
 import numpy as np
+from typing import Optional, Union, Any, Dict # Добавлен Dict
+from enum import Enum, auto
+
+class ModulationType(Enum):
+    """
+    Определяет, как значение с подключенного входа модулятора
+    взаимодействует с базовым значением параметра целевого модуля.
+    """
+    REPLACE = auto()  # Заменить базовое значение значением с входа (по умолчанию)
+    ADD = auto()      # Прибавить значение с входа к базовому значению
+    MULTIPLY = auto() # Умножить базовое значение на значение с входа
+
+class OutputConnector:
+    """
+    Представляет выходной порт (коннектор) модуля.
+    Хранит последнее вычисленное значение или блок значений (NumPy массив).
+    """
+    def __init__(self, name: str, module_owner: 'Module'):
+        """
+        Инициализирует выходной коннектор.
+
+        Args:
+            name (str): Имя выходного коннектора (например, 'audio', 'value', 'frequency_out').
+            module_owner (Module): Модуль, которому принадлежит этот коннектор.
+        """
+        self.name = name
+        self.module_owner = module_owner
+        self.value: Optional[np.ndarray] = None # Хранит NumPy массив или None
+
+    def __repr__(self):
+        return f"<OutputConnector name='{self.name}' of module='{self.module_owner.name}'>"
+
+class InputConnector:
+    """
+    Представляет входной порт (коннектор) модуля.
+    Отвечает за получение значения от подключенного `OutputConnector`,
+    применение масштабирования/смещения к этому значению, и его комбинацию
+    с локальным значением по умолчанию параметра, к которому он относится.
+    """
+    def __init__(self, name: str, module_owner: 'Module', 
+                 default_value: Union[float, np.ndarray] = 0.0,
+                 modulation_type: ModulationType = ModulationType.REPLACE,
+                 scale: float = 1.0, 
+                 offset: float = 0.0):
+        """
+        Инициализирует входной коннектор.
+
+        Args:
+            name (str): Имя входного коннектора (например, 'frequency', 'amplitude', 'audio_in').
+            module_owner (Module): Модуль, которому принадлежит этот коннектор.
+            default_value (Union[float, np.ndarray], optional): 
+                Значение по умолчанию для параметра, с которым связан этот вход.
+                Используется, если к входу ничего не подключено или если модуляция типа ADD.
+                Defaults to 0.0.
+            modulation_type (ModulationType, optional): 
+                Способ, которым сигнал с этого входа модулирует параметр.
+                `REPLACE`: значение с входа полностью заменяет default_value.
+                `ADD`: значение с входа добавляется к default_value.
+                `MULTIPLY`: default_value умножается на значение с входа.
+                Defaults to ModulationType.REPLACE.
+            scale (float, optional): Коэффициент масштабирования, применяемый к сигналу *перед* модуляцией. Defaults to 1.0.
+            offset (float, optional): Смещение, применяемое к сигналу *перед* модуляцией. Defaults to 0.0.
+        """
+        self.name = name
+        self.module_owner = module_owner
+        self.connected_to: Optional[OutputConnector] = None
+        
+        if isinstance(default_value, (int, float)):
+            self._default_value_np = np.array([float(default_value)], dtype=np.float32)
+        elif isinstance(default_value, np.ndarray):
+            self._default_value_np = default_value.astype(np.float32)
+        else:
+            raise TypeError("default_value должен быть float или NumPy ndarray.")
+
+        self.modulation_type = modulation_type
+        self.scale = scale
+        self.offset = offset
+
+    def connect(self, output_connector: OutputConnector):
+        """Подключает этот вход к указанному выходному коннектору."""
+        self.connected_to = output_connector
+        print(f"Вход '{self.name}' модуля '{self.module_owner.name}' подключен к выходу '{output_connector.name}' модуля '{output_connector.module_owner.name}'.")
+
+    def disconnect(self):
+        """Отключает этот вход от любого подключенного выходного коннектора."""
+        if self.connected_to:
+            print(f"Вход '{self.name}' модуля '{self.module_owner.name}' отключен от выхода '{self.connected_to.name}' модуля '{self.connected_to.module_owner.name}'.")
+            self.connected_to = None
+        else:
+            print(f"Вход '{self.name}' модуля '{self.module_owner.name}' уже был отключен.")
+
+    def get_value(self, num_samples: int, sample_rate: int) -> np.ndarray: # sample_rate пока не используется здесь, но может быть полезен для адаптивной обработки
+        """
+        Получает обработанное значение для этого входа на указанное количество сэмплов.
+        Результат всегда является NumPy массивом длиной `num_samples`.
+
+        Процесс:
+        1. Если есть подключение, получает сигнал от `OutputConnector`.
+        2. Применяет `self.scale` и `self.offset` к полученному сигналу (если он есть).
+        3. Подготавливает `default_value` (растягивает до `num_samples`, если это скаляр).
+        4. Комбинирует обработанный сигнал (если есть) с `processed_default` согласно `self.modulation_type`.
+           - `REPLACE`: Возвращает обработанный сигнал (после scale/offset), если он есть, иначе `processed_default`.
+           - `ADD`: Возвращает `processed_default + (обработанный_сигнал_после_scale_offset)`.
+           - `MULTIPLY`: Возвращает `processed_default * (обработанный_сигнал_после_scale_offset)`.
+
+        Args:
+            num_samples (int): Требуемое количество сэмплов (длина выходного массива).
+            sample_rate (int): Текущая частота дискретизации (для информации, пока не используется напрямую).
+
+        Returns:
+            np.ndarray: Массив значений для этого входа, готовый к использованию модулем.
+        """
+        source_signal_value: Optional[np.ndarray] = None
+        
+        if self.connected_to and self.connected_to.value is not None:
+            source_signal_value = self.connected_to.value
+            # Применяем scale и offset к сигналу с подключенного выхода
+            source_signal_value = (source_signal_value * self.scale) + self.offset
+        
+        # Готовим default_value (растягиваем до num_samples, если это скаляр)
+        if self._default_value_np.size == 1:
+            processed_default = np.full(num_samples, self._default_value_np.item(), dtype=np.float32)
+        elif self._default_value_np.size == num_samples:
+            processed_default = self._default_value_np.astype(np.float32) # Убедимся в типе
+        else: 
+            fill_val = self._default_value_np.item(0) if self._default_value_np.size > 0 else 0.0
+            # print(f"Предупреждение (InputConnector {self.name}): Некорректный размер default_value ({self._default_value_np.size}), ожидался 1 или {num_samples}. Используется {fill_val}.")
+            processed_default = np.full(num_samples, fill_val, dtype=np.float32)
+
+        if source_signal_value is not None:
+            # Растягиваем source_signal до num_samples, если это скаляр
+            if source_signal_value.size == 1:
+                source_signal_processed = np.full(num_samples, source_signal_value.item(), dtype=np.float32)
+            elif source_signal_value.size == num_samples:
+                source_signal_processed = source_signal_value.astype(np.float32)
+            else: 
+                fill_val = source_signal_value.item(0) if source_signal_value.size > 0 else 0.0
+                # print(f"Предупреждение (InputConnector {self.name}): Некорректный размер входного сигнала ({source_signal_value.size}), ожидался 1 или {num_samples}. Используется {fill_val}.")
+                source_signal_processed = np.full(num_samples, fill_val, dtype=np.float32)
+
+            if self.modulation_type == ModulationType.REPLACE:
+                return source_signal_processed
+            elif self.modulation_type == ModulationType.ADD:
+                return (processed_default + source_signal_processed).astype(np.float32)
+            elif self.modulation_type == ModulationType.MULTIPLY: # Новая ветка
+                return (processed_default * source_signal_processed).astype(np.float32)
+            else: # По умолчанию REPLACE (или можно сделать ошибку, если тип не известен)
+                # print(f"Предупреждение: Неизвестный ModulationType {self.modulation_type}. Используется REPLACE.")
+                return source_signal_processed.astype(np.float32)
+        else:
+            # Ничего не подключено или подключенный выход пуст
+            return processed_default
+
+    def __repr__(self):
+        connection_info = f"connected to '{self.connected_to.module_owner.name}.{self.connected_to.name}'" if self.connected_to else "disconnected"
+        return f"<InputConnector name='{self.name}' of module='{self.module_owner.name}', {connection_info}>"
 
 class Module(ABC):
-    """Базовый абстрактный класс для всех модулей в звуковом графе."""
+    """
+    Базовый абстрактный класс для всех модулей в звуковом графе (v2 с коннекторами).
+    Модули теперь определяют свои входы и выходы как экземпляры 
+    `InputConnector` и `OutputConnector`.
+    """
     def __init__(self, name: str):
         """
         Инициализирует базовый модуль.
@@ -12,79 +172,58 @@ class Module(ABC):
             name (str): Уникальное имя модуля.
         """
         self.name = name
-        self.inputs = {}  # Словарь для хранения подключений к входам: {'input_name': (source_module, 'source_output_name')}
-        self.outputs = {} # Словарь для хранения выходных значений/буферов: {'output_name': value_or_buffer}
+        # Коннекторы (входы/выходы) должны быть явно определены как атрибуты 
+        # в дочерних классах при их инициализации. Например:
+        # self.frequency_input = InputConnector(name='frequency', module_owner=self, default_value=440.0)
+        # self.audio_output = OutputConnector(name='audio', module_owner=self)
 
     @abstractmethod
     def process_block(self, num_samples: int, sample_rate: int):
         """
         Обрабатывает один блок данных.
         Этот метод должен быть реализован всеми дочерними классами.
-        Он должен обновлять self.outputs.
+        Он должен читать данные из своих `InputConnector`'ов (используя их метод `get_value()`)
+        и записывать результаты в свои `OutputConnector`'ы (присваивая их атрибуту `value`).
         """
         pass
 
-    def connect(self, input_name: str, source_module: 'Module', source_output_name: str):
-        """Подключает выход другого модуля к указанному входу этого модуля."""
-        # Простая реализация: сохраняем ссылку на модуль и имя его выхода
-        # Более сложная система может проверять типы, наличие коннекторов и т.д.
-        if source_output_name not in source_module.outputs:
-            raise ValueError(f"Выход '{source_output_name}' не найден в модуле '{source_module.name}'")
-        
-        self.inputs[input_name] = (source_module, source_output_name)
-        print(f"Модуль '{source_module.name}' (выход '{source_output_name}') подключен к '{self.name}' (вход '{input_name}')")
-
-    def get_input_value(self, input_name: str, num_samples: int, sample_rate: int, default_value=0.0):
+    def _get_all_connectors(self, connector_type: Union[type[InputConnector], type[OutputConnector]]) -> Dict[str, Union[InputConnector, OutputConnector]]:
         """
-        Получает значение с подключенного входа.
-        Если вход не подключен или модуль-источник не вернул значение, используется default_value.
-        Если подключен ControlModule, он может вернуть одно значение или массив.
-        Если подключен AudioModule, ожидается массив.
+        Вспомогательный метод для поиска всех коннекторов заданного типа (InputConnector или OutputConnector),
+        которые являются атрибутами этого модуля.
+
+        Args:
+            connector_type: Класс коннектора для поиска (InputConnector или OutputConnector).
+
+        Returns:
+            Dict[str, Union[InputConnector, OutputConnector]]: Словарь, где ключи - имена коннекторов, 
+                                                               значения - экземпляры коннекторов.
         """
-        if input_name in self.inputs:
-            source_module, source_output_name = self.inputs[input_name]
-            
-            # Предполагаем, что модуль-источник уже вызвал process_block 
-            # и его выходы обновлены, либо это ControlModule, который может 
-            # генерировать значение по запросу.
-            # Для ControlModules, которые генерируют одно значение за раз, 
-            # может потребоваться другая логика или их process_block должен быть вызван.
-            # В данной итерации, мы ожидаем, что source_module.outputs[source_output_name] уже актуально.
-            
-            val = source_module.outputs.get(source_output_name)
-            if val is not None:
-                # Если значение одно, а нам нужен блок, растягиваем его
-                if not isinstance(val, np.ndarray) or val.ndim == 0 or val.size == 1:
-                    return np.full(num_samples, float(val))
-                elif len(val) == num_samples:
-                    return val
-                else:
-                    # Несоответствие размера блока, можно интерполировать или обрезать, но пока ошибка
-                    # print(f"Предупреждение: Несоответствие размера блока для входа '{input_name}' модуля '{self.name}'. Ожидалось {num_samples}, получено {len(val)}. Используется default_value.")
-                    # Для упрощения пока вернем default если размер не совпадает, чтобы избежать ошибок далее
-                    # В будущем здесь нужна более умная обработка (например, resampling или кэширование последнего блока)
-                    return np.full(num_samples, default_value) # Возвращаем default если размеры не совпадают
-                #else: # Если val это массив, но не совпадает по длине
-                #    print(f"Предупреждение: Выход '{source_output_name}' модуля '{source_module.name}' для входа '{input_name}' модуля '{self.name}' имеет неверную длину ({len(val)} вместо {num_samples}). Используется default_value.")
-                #    pass # Пропускаем и используем default_value
-            else:
-                # print(f"Предупреждение: Выход '{source_output_name}' модуля '{source_module.name}' не содержит данных для входа '{input_name}' модуля '{self.name}'. Используется default_value.")
-                pass
+        connectors = {}
+        for attr_name in dir(self):
+            attr_value = getattr(self, attr_name)
+            if isinstance(attr_value, connector_type):
+                connectors[attr_value.name] = attr_value
+        return connectors
 
+    def get_input_connectors(self) -> Dict[str, InputConnector]:
+        """Возвращает словарь всех входных коннекторов этого модуля."""
+        return self._get_all_connectors(InputConnector) # type: ignore
 
-        if isinstance(default_value, (int, float)):
-            return np.full(num_samples, float(default_value))
-        elif isinstance(default_value, np.ndarray) and default_value.size == num_samples:
-            return default_value
-        elif isinstance(default_value, np.ndarray) and default_value.size == 1: # Если default это скаляр в массиве
-            return np.full(num_samples, default_value.item())
-        else:
-            # print(f"Предупреждение: default_value для '{input_name}' некорректно. Используется массив нулей.")
-            return np.zeros(num_samples)
+    def get_output_connectors(self) -> Dict[str, OutputConnector]:
+        """Возвращает словарь всех выходных коннекторов этого модуля."""
+        return self._get_all_connectors(OutputConnector) # type: ignore
+
+    def __repr__(self):
+        return f"<Module name='{self.name}' type='{type(self).__name__}'>"
 
 
 class AudioModule(Module):
-    """Базовый класс для модулей, генерирующих или обрабатывающих аудио. Основной выход называется 'audio'."""
+    """
+    Базовый класс для модулей, генерирующих или обрабатывающих аудио (v2).
+    Дочерние классы должны определить как минимум один `OutputConnector` (обычно с именем 'audio')
+    и, при необходимости, `InputConnector`'ы (например, 'audio_in' для эффектов).
+    """
     def __init__(self, name: str):
         """
         Инициализирует аудио-модуль.
@@ -93,16 +232,24 @@ class AudioModule(Module):
             name (str): Уникальное имя модуля.
         """
         super().__init__(name)
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32) # Основной аудио выход по умолчанию, тип float32
+        # Пример определения коннекторов в дочернем классе:
+        # self.audio_out = OutputConnector(name='audio', module_owner=self)
+        # self.audio_in = InputConnector(name='audio_in', module_owner=self, default_value=np.zeros(0)) # Для эффектов
 
     @abstractmethod
     def process_block(self, num_samples: int, sample_rate: int):
-        # Должен обновить self.outputs['audio']
+        """
+        Обрабатывает блок аудио. Должен прочитать данные из входных аудио-коннекторов (если есть)
+        и записать результат в выходной аудио-коннектор (например, `self.audio_out.value`).
+        """
         pass
 
 
 class ControlModule(Module):
-    """Базовый класс для модулей, генерирующих управляющие сигналы. Основной выход называется 'value'."""
+    """
+    Базовый класс для модулей, генерирующих управляющие сигналы (v2).
+    Дочерние классы должны определить как минимум один `OutputConnector` (обычно с именем 'value').
+    """
     def __init__(self, name: str):
         """
         Инициализирует управляющий модуль.
@@ -111,35 +258,14 @@ class ControlModule(Module):
             name (str): Уникальное имя модуля.
         """
         super().__init__(name)
-        self.outputs['value'] = 0.0 # Основной управляющий выход по умолчанию
+        # Пример определения коннектора в дочернем классе:
+        # self.value_out = OutputConnector(name='value', module_owner=self)
 
     @abstractmethod
     def process_block(self, num_samples: int, sample_rate: int):
-        # Должен обновить self.outputs['value']
-        # Выход может быть одним числом или массивом значений (например, огибающая)
+        """
+        Генерирует блок управляющих значений. Должен записать результат
+        в выходной управляющий коннектор (например, `self.value_out.value`).
+        Выход может быть одним числом (будет растянут) или массивом NumPy.
+        """
         pass
-
-# Добавим комментарии на русском языке к классам и методам.
-# Явное присваивание docstrings здесь не требуется, если они определены непосредственно в классах/методах.
-# Убедимся, что docstrings выше определены корректно.
-# Module.__doc__ = "Базовый абстрактный класс для всех модулей в звуковом графе." # Уже есть у класса
-Module.process_block.__doc__ = """        Обрабатывает один блок данных.
-        Этот метод должен быть реализован всеми дочерними классами.
-        Он должен обновлять значения в `self.outputs`.
-        Например, для `AudioModule` это будет `self.outputs['audio']`,
-        а для `ControlModule` - `self.outputs['value']`.
-        """
-Module.connect.__doc__ = "Подключает выход другого модуля к указанному входу этого модуля."
-Module.get_input_value.__doc__ = """
-        Получает массив значений с подключенного входа для текущего блока обработки.
-        - `input_name`: Имя входа, с которого нужно прочитать значение.
-        - `num_samples`: Требуемое количество сэмплов (длина массива).
-        - `sample_rate`: Текущая частота дискретизации.
-        - `default_value`: Значение или массив, используемое если вход не подключен или источник не предоставил данные.
-        Если подключенный модуль вернул одно значение, оно будет "растянуто" на `num_samples`.
-        Если размер массива от источника не совпадает с `num_samples`, будет использовано `default_value`.
-        """
-AudioModule.__doc__ = "Базовый класс для модулей, генерирующих или обрабатывающих аудио. Основной выход называется 'audio'."
-AudioModule.process_block.__doc__ = "Обрабатывает блок аудио. Должен обновить `self.outputs['audio']` массивом NumPy размером `num_samples`."
-ControlModule.__doc__ = "Базовый класс для модулей, генерирующих управляющие сигналы. Основной выход называется 'value'."
-ControlModule.process_block.__doc__ = "Генерирует блок управляющих значений. Должен обновить `self.outputs['value']`. Это может быть одно число (будет растянуто) или массив NumPy размером `num_samples`."

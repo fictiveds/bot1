@@ -1,13 +1,12 @@
 # nodal_engine/modules.py
 import numpy as np
 import math # для pi
-from enum import Enum, auto # Добавлено для EnvelopeState
-from .core import AudioModule, ControlModule 
+from enum import Enum, auto
+from .core import AudioModule, ControlModule, InputConnector, OutputConnector, ModulationType
 from audio_engine.waveforms import generate_sine_wave, generate_square_wave, generate_sawtooth_wave, generate_noise_wave
 from audio_engine.effects import apply_delay, apply_filter, apply_reverb 
 from audio_engine.pydub_utils import _numpy_to_segment, _segment_to_numpy, apply_simplified_granular_effect as pydub_granular_effect
-from pydub import AudioSegment 
-# from utils.constants import SAMPLE_RATE
+# from pydub import AudioSegment # Больше не нужен здесь напрямую, если pydub_utils справляется
 
 class EnvelopeState(Enum):
     """Состояния ADSR-огибающей."""
@@ -18,7 +17,7 @@ class EnvelopeState(Enum):
     RELEASE = auto()
 
 class SineOscillator(AudioModule):
-    """Осциллятор, генерирующий синусоидальную волну."""
+    """Осциллятор, генерирующий синусоидальную волну (v2 с коннекторами)."""
     def __init__(self, name: str, frequency: float = 440.0, amplitude: float = 0.5):
         """
         Инициализирует осциллятор синусоидальной волны.
@@ -29,38 +28,21 @@ class SineOscillator(AudioModule):
             amplitude (float, optional): Начальная амплитуда (0.0-1.0). Defaults to 0.5.
         """
         super().__init__(name)
-        self._frequency = frequency
-        self._amplitude = amplitude
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
-
-    @property
-    def frequency(self) -> float:
-        """Текущая частота осциллятора в Гц."""
-        return self._frequency
-
-    @frequency.setter
-    def frequency(self, value: float):
-        self._frequency = float(value)
-
-    @property
-    def amplitude(self) -> float:
-        """Текущая амплитуда осциллятора (0.0 до 1.0)."""
-        return self._amplitude
-
-    @amplitude.setter
-    def amplitude(self, value: float):
-        self._amplitude = float(value)
+        self.frequency_in = InputConnector(name='frequency', module_owner=self, default_value=frequency, modulation_type=ModulationType.REPLACE)
+        self.amplitude_in = InputConnector(name='amplitude', module_owner=self, default_value=amplitude, modulation_type=ModulationType.REPLACE)
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32) # Инициализация выходного буфера
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Генерирует блок синусоидальной волны. Частота и амплитуда могут управляться через входы 'frequency' и 'amplitude'."""
-        freq_values = self.get_input_value('frequency', num_samples, sample_rate, default_value=self._frequency)
-        amp_values = self.get_input_value('amplitude', num_samples, sample_rate, default_value=self._amplitude)
-
-        current_freq = freq_values[0] if isinstance(freq_values, np.ndarray) and freq_values.size > 0 else self._frequency
-        current_amp = amp_values[0] if isinstance(amp_values, np.ndarray) and amp_values.size > 0 else self._amplitude
+        """Генерирует блок синусоидальной волны, используя значения с входных коннекторов."""
+        freq_values = self.frequency_in.get_value(num_samples, sample_rate)
+        amp_values = self.amplitude_in.get_value(num_samples, sample_rate)
         
-        if isinstance(current_freq, np.ndarray): current_freq = current_freq.item()
-        if isinstance(current_amp, np.ndarray): current_amp = current_amp.item()
+        # Для осцилляторов обычно используется одно значение частоты/амплитуды на блок,
+        # или первое значение из модулирующего массива.
+        # Более сложная логика (например, обработка каждого сэмпла с разной частотой) здесь не реализована.
+        current_freq = freq_values[0] 
+        current_amp = amp_values[0]  
 
         duration_sec = num_samples / sample_rate
         
@@ -71,746 +53,350 @@ class SineOscillator(AudioModule):
             sample_rate=sample_rate
         )
         
+        # Обеспечение корректной длины и типа
         if len(wave) > num_samples:
-            self.outputs['audio'] = wave[:num_samples].astype(np.float32)
+            processed_wave = wave[:num_samples].astype(np.float32)
         elif len(wave) < num_samples:
-            self.outputs['audio'] = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
+            processed_wave = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
         else:
-            self.outputs['audio'] = wave.astype(np.float32)
+            processed_wave = wave.astype(np.float32)
+        
+        self.audio_out.value = processed_wave
 
 class SquareOscillator(AudioModule):
-    """Осциллятор, генерирующий прямоугольную волну."""
+    """Осциллятор, генерирующий прямоугольную волну (v2 с коннекторами)."""
     def __init__(self, name: str, frequency: float = 440.0, amplitude: float = 0.5):
-        """
-        Инициализирует осциллятор прямоугольной волны.
-
-        Args:
-            name (str): Имя модуля.
-            frequency (float, optional): Начальная частота в Гц. Defaults to 440.0.
-            amplitude (float, optional): Начальная амплитуда (0.0-1.0). Defaults to 0.5.
-        """
+        """Инициализирует осциллятор прямоугольной волны."""
         super().__init__(name)
-        self._frequency = frequency
-        self._amplitude = amplitude
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
-
-    @property
-    def frequency(self) -> float:
-        """Текущая частота осциллятора в Гц."""
-        return self._frequency
-
-    @frequency.setter
-    def frequency(self, value: float):
-        self._frequency = float(value)
-
-    @property
-    def amplitude(self) -> float:
-        """Текущая амплитуда осциллятора (0.0 до 1.0)."""
-        return self._amplitude
-
-    @amplitude.setter
-    def amplitude(self, value: float):
-        self._amplitude = float(value)
+        self.frequency_in = InputConnector(name='frequency', module_owner=self, default_value=frequency, modulation_type=ModulationType.REPLACE)
+        self.amplitude_in = InputConnector(name='amplitude', module_owner=self, default_value=amplitude, modulation_type=ModulationType.REPLACE)
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Генерирует блок прямоугольной волны. Частота и амплитуда могут управляться через входы 'frequency' и 'amplitude'."""
-        freq_values = self.get_input_value('frequency', num_samples, sample_rate, default_value=self._frequency)
-        amp_values = self.get_input_value('amplitude', num_samples, sample_rate, default_value=self._amplitude)
-
-        current_freq = freq_values[0] if isinstance(freq_values, np.ndarray) and freq_values.size > 0 else self._frequency
-        current_amp = amp_values[0] if isinstance(amp_values, np.ndarray) and amp_values.size > 0 else self._amplitude
-
-        if isinstance(current_freq, np.ndarray): current_freq = current_freq.item()
-        if isinstance(current_amp, np.ndarray): current_amp = current_amp.item()
-            
+        """Генерирует блок прямоугольной волны."""
+        freq_values = self.frequency_in.get_value(num_samples, sample_rate)
+        amp_values = self.amplitude_in.get_value(num_samples, sample_rate)
+        current_freq = freq_values[0]
+        current_amp = amp_values[0]
         duration_sec = num_samples / sample_rate
-        
-        wave = generate_square_wave(
-            frequency=current_freq,
-            duration=duration_sec,
-            amplitude=current_amp,
-            sample_rate=sample_rate
-        )
-        
-        if len(wave) > num_samples:
-            self.outputs['audio'] = wave[:num_samples].astype(np.float32)
-        elif len(wave) < num_samples:
-            self.outputs['audio'] = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
-        else:
-            self.outputs['audio'] = wave.astype(np.float32)
+        wave = generate_square_wave(frequency=current_freq, duration=duration_sec, amplitude=current_amp, sample_rate=sample_rate)
+        if len(wave) > num_samples: self.audio_out.value = wave[:num_samples].astype(np.float32)
+        elif len(wave) < num_samples: self.audio_out.value = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
+        else: self.audio_out.value = wave.astype(np.float32)
 
 class SawtoothOscillator(AudioModule):
-    """Осциллятор, генерирующий пилообразную волну."""
+    """Осциллятор, генерирующий пилообразную волну (v2 с коннекторами)."""
     def __init__(self, name: str, frequency: float = 440.0, amplitude: float = 0.5):
-        """
-        Инициализирует осциллятор пилообразной волны.
-
-        Args:
-            name (str): Имя модуля.
-            frequency (float, optional): Начальная частота в Гц. Defaults to 440.0.
-            amplitude (float, optional): Начальная амплитуда (0.0-1.0). Defaults to 0.5.
-        """
+        """Инициализирует осциллятор пилообразной волны."""
         super().__init__(name)
-        self._frequency = frequency
-        self._amplitude = amplitude
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
-
-    @property
-    def frequency(self) -> float:
-        """Текущая частота осциллятора в Гц."""
-        return self._frequency
-
-    @frequency.setter
-    def frequency(self, value: float):
-        self._frequency = float(value)
-
-    @property
-    def amplitude(self) -> float:
-        """Текущая амплитуда осциллятора (0.0 до 1.0)."""
-        return self._amplitude
-
-    @amplitude.setter
-    def amplitude(self, value: float):
-        self._amplitude = float(value)
+        self.frequency_in = InputConnector(name='frequency', module_owner=self, default_value=frequency, modulation_type=ModulationType.REPLACE)
+        self.amplitude_in = InputConnector(name='amplitude', module_owner=self, default_value=amplitude, modulation_type=ModulationType.REPLACE)
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Генерирует блок пилообразной волны. Частота и амплитуда могут управляться через входы 'frequency' и 'amplitude'."""
-        freq_values = self.get_input_value('frequency', num_samples, sample_rate, default_value=self._frequency)
-        amp_values = self.get_input_value('amplitude', num_samples, sample_rate, default_value=self._amplitude)
-
-        current_freq = freq_values[0] if isinstance(freq_values, np.ndarray) and freq_values.size > 0 else self._frequency
-        current_amp = amp_values[0] if isinstance(amp_values, np.ndarray) and amp_values.size > 0 else self._amplitude
-
-        if isinstance(current_freq, np.ndarray): current_freq = current_freq.item()
-        if isinstance(current_amp, np.ndarray): current_amp = current_amp.item()
-            
+        """Генерирует блок пилообразной волны."""
+        freq_values = self.frequency_in.get_value(num_samples, sample_rate)
+        amp_values = self.amplitude_in.get_value(num_samples, sample_rate)
+        current_freq = freq_values[0]
+        current_amp = amp_values[0]
         duration_sec = num_samples / sample_rate
-        
-        wave = generate_sawtooth_wave(
-            frequency=current_freq,
-            duration=duration_sec,
-            amplitude=current_amp,
-            sample_rate=sample_rate
-        )
-        
-        if len(wave) > num_samples:
-            self.outputs['audio'] = wave[:num_samples].astype(np.float32)
-        elif len(wave) < num_samples:
-            self.outputs['audio'] = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
-        else:
-            self.outputs['audio'] = wave.astype(np.float32)
+        wave = generate_sawtooth_wave(frequency=current_freq, duration=duration_sec, amplitude=current_amp, sample_rate=sample_rate)
+        if len(wave) > num_samples: self.audio_out.value = wave[:num_samples].astype(np.float32)
+        elif len(wave) < num_samples: self.audio_out.value = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
+        else: self.audio_out.value = wave.astype(np.float32)
 
 class NoiseGenerator(AudioModule):
-    """Генератор, создающий белый шум."""
+    """Генератор, создающий белый шум (v2 с коннекторами)."""
     def __init__(self, name: str, amplitude: float = 0.5):
-        """
-        Инициализирует генератор белого шума.
-
-        Args:
-            name (str): Имя модуля.
-            amplitude (float, optional): Начальная амплитуда (0.0-1.0). Defaults to 0.5.
-        """
+        """Инициализирует генератор белого шума."""
         super().__init__(name)
-        self._amplitude = amplitude
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
-
-    @property
-    def amplitude(self) -> float:
-        """Текущая амплитуда генератора шума (0.0 до 1.0)."""
-        return self._amplitude
-
-    @amplitude.setter
-    def amplitude(self, value: float):
-        self._amplitude = float(value)
+        self.amplitude_in = InputConnector(name='amplitude', module_owner=self, default_value=amplitude, modulation_type=ModulationType.REPLACE)
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Генерирует блок белого шума. Амплитуда может управляться через вход 'amplitude'."""
-        amp_values = self.get_input_value('amplitude', num_samples, sample_rate, default_value=self._amplitude)
-        
-        current_amp = amp_values[0] if isinstance(amp_values, np.ndarray) and amp_values.size > 0 else self._amplitude
-
-        if isinstance(current_amp, np.ndarray): current_amp = current_amp.item()
-
+        """Генерирует блок белого шума."""
+        amp_values = self.amplitude_in.get_value(num_samples, sample_rate)
+        current_amp = amp_values[0]
         duration_sec = num_samples / sample_rate
-        
-        wave = generate_noise_wave(
-            duration=duration_sec,
-            amplitude=current_amp,
-            sample_rate=sample_rate
-        )
-        
-        if len(wave) > num_samples:
-            self.outputs['audio'] = wave[:num_samples].astype(np.float32)
-        elif len(wave) < num_samples:
-            self.outputs['audio'] = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
-        else:
-            self.outputs['audio'] = wave.astype(np.float32)
+        wave = generate_noise_wave(duration=duration_sec, amplitude=current_amp, sample_rate=sample_rate)
+        if len(wave) > num_samples: self.audio_out.value = wave[:num_samples].astype(np.float32)
+        elif len(wave) < num_samples: self.audio_out.value = np.pad(wave, (0, num_samples - len(wave)), 'constant').astype(np.float32)
+        else: self.audio_out.value = wave.astype(np.float32)
 
-# --- Классы Эффектов ---
+# --- Классы Эффектов (v2 с коннекторами) ---
 
 class DelayEffect(AudioModule):
-    """Применяет эффект задержки (delay) к аудиосигналу."""
+    """Применяет эффект задержки (delay) к аудиосигналу (v2 с коннекторами)."""
     def __init__(self, name: str, delay_seconds: float = 0.5, decay_factor: float = 0.4):
-        """
-        Инициализирует модуль эффекта задержки.
-
-        Args:
-            name (str): Имя модуля.
-            delay_seconds (float, optional): Начальное время задержки в секундах. Defaults to 0.5.
-            decay_factor (float, optional): Начальный коэффициент затухания эха. Defaults to 0.4.
-        """
+        """Инициализирует модуль эффекта задержки."""
         super().__init__(name)
-        self._delay_seconds = delay_seconds
-        self._decay_factor = decay_factor
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
-
-    @property
-    def delay_seconds(self) -> float:
-        """Время задержки в секундах."""
-        return self._delay_seconds
-
-    @delay_seconds.setter
-    def delay_seconds(self, value: float):
-        self._delay_seconds = float(value)
-
-    @property
-    def decay_factor(self) -> float:
-        """Коэффициент затухания эха (0.0 до 1.0)."""
-        return self._decay_factor
-
-    @decay_factor.setter
-    def decay_factor(self, value: float):
-        self._decay_factor = float(value)
+        self.audio_in = InputConnector(name='audio_in', module_owner=self, default_value=np.zeros(1, dtype=np.float32)) # default_value будет растянут до num_samples в get_value
+        self.delay_seconds_in = InputConnector(name='delay_seconds', module_owner=self, default_value=delay_seconds, modulation_type=ModulationType.REPLACE)
+        self.decay_factor_in = InputConnector(name='decay_factor', module_owner=self, default_value=decay_factor, modulation_type=ModulationType.REPLACE)
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Обрабатывает блок аудио, применяя эффект задержки. 
-        Параметры 'delay_seconds' и 'decay_factor' могут управляться через входы."""
-        audio_in_block = self.get_input_value('audio_in', num_samples, sample_rate, default_value=np.zeros(num_samples, dtype=np.float32))
+        """Обрабатывает блок аудио, применяя эффект задержки."""
+        audio_in_block = self.audio_in.get_value(num_samples, sample_rate)
+        delay_sec_values = self.delay_seconds_in.get_value(num_samples, sample_rate)
+        decay_factor_values = self.decay_factor_in.get_value(num_samples, sample_rate)
         
-        delay_sec_values = self.get_input_value('delay_seconds', num_samples, sample_rate, default_value=self._delay_seconds)
-        decay_factor_values = self.get_input_value('decay_factor', num_samples, sample_rate, default_value=self._decay_factor)
-
-        current_delay_sec = delay_sec_values[0] if isinstance(delay_sec_values, np.ndarray) and delay_sec_values.size > 0 else self._delay_seconds
-        current_decay_factor = decay_factor_values[0] if isinstance(decay_factor_values, np.ndarray) and decay_factor_values.size > 0 else self._decay_factor
+        current_delay_sec = delay_sec_values[0]
+        current_decay_factor = decay_factor_values[0]
         
-        if isinstance(current_delay_sec, np.ndarray): current_delay_sec = current_delay_sec.item()
-        if isinstance(current_decay_factor, np.ndarray): current_decay_factor = current_decay_factor.item()
+        processed_audio = apply_delay(wave_data=audio_in_block, sample_rate=sample_rate, delay_seconds=current_delay_sec, decay_factor=current_decay_factor)
         
-        processed_audio = apply_delay(
-            wave_data=audio_in_block,
-            sample_rate=sample_rate,
-            delay_seconds=current_delay_sec,
-            decay_factor=current_decay_factor
-        )
-        
-        if len(processed_audio) > num_samples:
-            self.outputs['audio'] = processed_audio[:num_samples].astype(np.float32)
-        elif len(processed_audio) < num_samples:
-            self.outputs['audio'] = np.pad(processed_audio, (0, num_samples - len(processed_audio)), 'constant').astype(np.float32)
-        else:
-            self.outputs['audio'] = processed_audio.astype(np.float32)
+        if len(processed_audio) > num_samples: self.audio_out.value = processed_audio[:num_samples].astype(np.float32)
+        elif len(processed_audio) < num_samples: self.audio_out.value = np.pad(processed_audio, (0, num_samples - len(processed_audio)), 'constant').astype(np.float32)
+        else: self.audio_out.value = processed_audio.astype(np.float32)
 
 class FilterEffect(AudioModule):
-    """Применяет эффект фильтрации (ФНЧ или ФВЧ) к аудиосигналу."""
+    """Применяет эффект фильтрации (ФНЧ или ФВЧ) к аудиосигналу (v2 с коннекторами)."""
     def __init__(self, name: str, cutoff_hz: float = 1000.0, filter_type: str = 'lowpass', order: int = 5):
-        """
-        Инициализирует модуль эффекта фильтрации.
-
-        Args:
-            name (str): Имя модуля.
-            cutoff_hz (float, optional): Начальная частота среза в Гц. Defaults to 1000.0.
-            filter_type (str, optional): Тип фильтра ('lowpass' или 'highpass'). Defaults to 'lowpass'.
-            order (int, optional): Порядок фильтра. Defaults to 5.
-        """
+        """Инициализирует модуль эффекта фильтрации."""
         super().__init__(name)
-        self._cutoff_hz = cutoff_hz
-        if filter_type not in ['lowpass', 'highpass']:
-            raise ValueError("filter_type должен быть 'lowpass' или 'highpass'")
-        self._filter_type = filter_type
-        self._order = order
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
+        self.audio_in = InputConnector(name='audio_in', module_owner=self, default_value=np.zeros(1, dtype=np.float32))
+        self.cutoff_hz_in = InputConnector(name='cutoff_hz', module_owner=self, default_value=cutoff_hz, modulation_type=ModulationType.REPLACE)
+        
+        if filter_type not in ['lowpass', 'highpass']: raise ValueError("filter_type должен быть 'lowpass' или 'highpass'")
+        self._filter_type = filter_type # Оставляем как property, не модулируемый через InputConnector
+        self._order = order             # Оставляем как property, не модулируемый через InputConnector
+        
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     @property
-    def cutoff_hz(self) -> float:
-        """Частота среза фильтра в Гц."""
-        return self._cutoff_hz
-
-    @cutoff_hz.setter
-    def cutoff_hz(self, value: float):
-        self._cutoff_hz = float(value)
-
-    @property
-    def filter_type(self) -> str:
-        """Тип фильтра ('lowpass' или 'highpass')."""
+    def filter_type(self) -> str: """Тип фильтра ('lowpass' или 'highpass')."""
         return self._filter_type
-
     @filter_type.setter
     def filter_type(self, value: str):
-        if value not in ['lowpass', 'highpass']:
-            raise ValueError("filter_type должен быть 'lowpass' или 'highpass'")
+        if value not in ['lowpass', 'highpass']: raise ValueError("filter_type должен быть 'lowpass' или 'highpass'")
         self._filter_type = value
         
     @property
-    def order(self) -> int:
-        """Порядок фильтра."""
+    def order(self) -> int: """Порядок фильтра."""
         return self._order
-
     @order.setter
-    def order(self, value: int):
-        self._order = int(value)
+    def order(self, value: int): self._order = int(value)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Обрабатывает блок аудио, применяя эффект фильтрации. 
-        Параметр 'cutoff_hz' может управляться через вход."""
-        audio_in_block = self.get_input_value('audio_in', num_samples, sample_rate, default_value=np.zeros(num_samples, dtype=np.float32))
-        cutoff_values = self.get_input_value('cutoff_hz', num_samples, sample_rate, default_value=self._cutoff_hz)
+        """Обрабатывает блок аудио, применяя эффект фильтрации."""
+        audio_in_block = self.audio_in.get_value(num_samples, sample_rate)
+        cutoff_values = self.cutoff_hz_in.get_value(num_samples, sample_rate)
+        current_cutoff = cutoff_values[0]
         
-        current_cutoff = cutoff_values[0] if isinstance(cutoff_values, np.ndarray) and cutoff_values.size > 0 else self._cutoff_hz
-        if isinstance(current_cutoff, np.ndarray): current_cutoff = current_cutoff.item()
-
-        # filter_type и order пока не управляются через входы, используются внутренние значения
-        processed_audio = apply_filter(
-            wave_data=audio_in_block,
-            sample_rate=sample_rate,
-            cutoff_hz=current_cutoff,
-            filter_type=self._filter_type,
-            order=self._order
-        )
-        self.outputs['audio'] = processed_audio.astype(np.float32) # apply_filter возвращает массив нужной длины
+        processed_audio = apply_filter(wave_data=audio_in_block, sample_rate=sample_rate, cutoff_hz=current_cutoff, filter_type=self._filter_type, order=self._order)
+        self.audio_out.value = processed_audio.astype(np.float32)
 
 class ReverbEffect(AudioModule):
-    """Применяет эффект реверберации к аудиосигналу."""
+    """Применяет эффект реверберации к аудиосигналу (v2 с коннекторами)."""
     def __init__(self, name: str, number_of_delays: int = 5, max_delay_seconds: float = 0.5, overall_decay_factor: float = 0.6):
-        """
-        Инициализирует модуль эффекта реверберации.
-
-        Args:
-            name (str): Имя модуля.
-            number_of_delays (int, optional): Начальное количество линий задержки. Defaults to 5.
-            max_delay_seconds (float, optional): Начальное максимальное время задержки. Defaults to 0.5.
-            overall_decay_factor (float, optional): Начальный общий коэффициент затухания. Defaults to 0.6.
-        """
+        """Инициализирует модуль эффекта реверберации."""
         super().__init__(name)
-        self._number_of_delays = number_of_delays
-        self._max_delay_seconds = max_delay_seconds
-        self._overall_decay_factor = overall_decay_factor
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
-
-    @property
-    def number_of_delays(self) -> int:
-        return self._number_of_delays
-    @number_of_delays.setter
-    def number_of_delays(self, value: int):
-        self._number_of_delays = int(value)
-
-    @property
-    def max_delay_seconds(self) -> float:
-        return self._max_delay_seconds
-    @max_delay_seconds.setter
-    def max_delay_seconds(self, value: float):
-        self._max_delay_seconds = float(value)
-
-    @property
-    def overall_decay_factor(self) -> float:
-        return self._overall_decay_factor
-    @overall_decay_factor.setter
-    def overall_decay_factor(self, value: float):
-        self._overall_decay_factor = float(value)
+        self.audio_in = InputConnector(name='audio_in', module_owner=self, default_value=np.zeros(1, dtype=np.float32))
+        self.number_of_delays_in = InputConnector(name='number_of_delays', module_owner=self, default_value=float(number_of_delays), modulation_type=ModulationType.REPLACE)
+        self.max_delay_seconds_in = InputConnector(name='max_delay_seconds', module_owner=self, default_value=max_delay_seconds, modulation_type=ModulationType.REPLACE)
+        self.overall_decay_factor_in = InputConnector(name='overall_decay_factor', module_owner=self, default_value=overall_decay_factor, modulation_type=ModulationType.REPLACE)
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Обрабатывает блок аудио, применяя эффект реверберации.
-        Параметры могут управляться через входы 'number_of_delays', 'max_delay_seconds', 'overall_decay_factor'."""
-        audio_in_block = self.get_input_value('audio_in', num_samples, sample_rate, default_value=np.zeros(num_samples, dtype=np.float32))
+        """Обрабатывает блок аудио, применяя эффект реверберации."""
+        audio_in_block = self.audio_in.get_value(num_samples, sample_rate)
+        num_delays_vals = self.number_of_delays_in.get_value(num_samples, sample_rate)
+        max_delay_vals = self.max_delay_seconds_in.get_value(num_samples, sample_rate)
+        decay_vals = self.overall_decay_factor_in.get_value(num_samples, sample_rate)
+
+        current_num_delays = int(num_delays_vals[0])
+        current_max_delay = max_delay_vals[0]
+        current_decay = decay_vals[0]
         
-        # Для упрощения, пока параметры реверберации берутся из свойств, а не из управляющих входов
-        # TODO: Добавить чтение параметров из self.get_input_value по аналогии с DelayEffect
+        processed_audio = apply_reverb(wave_data=audio_in_block, sample_rate=sample_rate, number_of_delays=current_num_delays, max_delay_seconds=current_max_delay, overall_decay_factor=current_decay)
         
-        processed_audio = apply_reverb(
-            wave_data=audio_in_block,
-            sample_rate=sample_rate,
-            number_of_delays=self._number_of_delays,
-            max_delay_seconds=self._max_delay_seconds,
-            overall_decay_factor=self._overall_decay_factor
-        )
-        
-        if len(processed_audio) > num_samples:
-            self.outputs['audio'] = processed_audio[:num_samples].astype(np.float32)
-        elif len(processed_audio) < num_samples:
-            self.outputs['audio'] = np.pad(processed_audio, (0, num_samples - len(processed_audio)), 'constant').astype(np.float32)
-        else:
-            self.outputs['audio'] = processed_audio.astype(np.float32)
+        if len(processed_audio) > num_samples: self.audio_out.value = processed_audio[:num_samples].astype(np.float32)
+        elif len(processed_audio) < num_samples: self.audio_out.value = np.pad(processed_audio, (0, num_samples - len(processed_audio)), 'constant').astype(np.float32)
+        else: self.audio_out.value = processed_audio.astype(np.float32)
 
 class GranularEffect(AudioModule):
-    """Применяет упрощенный гранулярный эффект к аудиосигналу.
-    (Временная реализация через конвертацию в/из AudioSegment)."""
+    """Применяет упрощенный гранулярный эффект (v2 с коннекторами)."""
     def __init__(self, name: str, grain_duration_ms: int = 50, density: float = 1.0, output_duration_factor: float = 1.0):
-        """
-        Инициализирует модуль гранулярного эффекта.
-
-        Args:
-            name (str): Имя модуля.
-            grain_duration_ms (int, optional): Начальная длительность гранулы в мс. Defaults to 50.
-            density (float, optional): Начальная плотность гранул. Defaults to 1.0.
-            output_duration_factor (float, optional): Начальный множитель длительности выхода. Defaults to 1.0.
-        """
+        """Инициализирует модуль гранулярного эффекта."""
         super().__init__(name)
-        self._grain_duration_ms = grain_duration_ms
-        self._density = density
-        self._output_duration_factor = output_duration_factor
-        self.outputs['audio'] = np.zeros(0, dtype=np.float32)
-
-    @property
-    def grain_duration_ms(self) -> int:
-        return self._grain_duration_ms
-    @grain_duration_ms.setter
-    def grain_duration_ms(self, value: int):
-        self._grain_duration_ms = int(value)
-
-    @property
-    def density(self) -> float:
-        return self._density
-    @density.setter
-    def density(self, value: float):
-        self._density = float(value)
-
-    @property
-    def output_duration_factor(self) -> float:
-        return self._output_duration_factor
-    @output_duration_factor.setter
-    def output_duration_factor(self, value: float):
-        self._output_duration_factor = float(value)
+        self.audio_in = InputConnector(name='audio_in', module_owner=self, default_value=np.zeros(1, dtype=np.float32))
+        self.grain_duration_ms_in = InputConnector(name='grain_duration_ms', module_owner=self, default_value=float(grain_duration_ms), modulation_type=ModulationType.REPLACE)
+        self.density_in = InputConnector(name='density', module_owner=self, default_value=density, modulation_type=ModulationType.REPLACE)
+        self.output_duration_factor_in = InputConnector(name='output_duration_factor', module_owner=self, default_value=output_duration_factor, modulation_type=ModulationType.REPLACE)
+        self.audio_out = OutputConnector(name='audio', module_owner=self)
+        self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """Обрабатывает блок аудио, применяя гранулярный эффект.
-        Параметры могут управляться через входы 'grain_duration_ms', 'density', 'output_duration_factor'."""
-        audio_in_block = self.get_input_value('audio_in', num_samples, sample_rate, default_value=np.zeros(num_samples, dtype=np.float32))
-        
-        # TODO: Добавить чтение параметров из self.get_input_value
-        # Пока используем внутренние значения
+        """Обрабатывает блок аудио, применяя гранулярный эффект."""
+        audio_in_block_np = self.audio_in.get_value(num_samples, sample_rate)
+        grain_dur_vals = self.grain_duration_ms_in.get_value(num_samples, sample_rate)
+        density_vals = self.density_in.get_value(num_samples, sample_rate)
+        out_factor_vals = self.output_duration_factor_in.get_value(num_samples, sample_rate)
 
-        if audio_in_block.size == 0: # Если входной блок пустой
-            self.outputs['audio'] = np.zeros(num_samples, dtype=np.float32)
+        current_grain_dur = int(grain_dur_vals[0])
+        current_density = density_vals[0]
+        current_out_factor = out_factor_vals[0]
+
+        if audio_in_block_np.size == 0:
+            self.audio_out.value = np.zeros(num_samples, dtype=np.float32)
             return
 
-        audio_segment_in = _numpy_to_segment(audio_in_block, sample_rate)
-        
-        processed_segment_out = pydub_granular_effect(
-            audio_segment_in,
-            grain_duration_ms=self._grain_duration_ms,
-            density=self._density,
-            output_duration_factor=self._output_duration_factor
-        )
-        
+        audio_segment_in = _numpy_to_segment(audio_in_block_np, sample_rate)
+        processed_segment_out = pydub_granular_effect(audio_segment_in, grain_duration_ms=current_grain_dur, density=current_density, output_duration_factor=current_out_factor)
         processed_audio_np = _segment_to_numpy(processed_segment_out)
         
-        # Регулировка длины результата
-        if len(processed_audio_np) > num_samples:
-            self.outputs['audio'] = processed_audio_np[:num_samples].astype(np.float32)
-        elif len(processed_audio_np) < num_samples:
-            # Если результат короче, дополняем нулями до нужной длины
-            # Это может быть неидеально для гранулярного синтеза, т.к. он может менять длительность
-            self.outputs['audio'] = np.pad(processed_audio_np, (0, num_samples - len(processed_audio_np)), 'constant').astype(np.float32)
-        else:
-            self.outputs['audio'] = processed_audio_np.astype(np.float32)
+        if len(processed_audio_np) > num_samples: self.audio_out.value = processed_audio_np[:num_samples].astype(np.float32)
+        elif len(processed_audio_np) < num_samples: self.audio_out.value = np.pad(processed_audio_np, (0, num_samples - len(processed_audio_np)), 'constant').astype(np.float32)
+        else: self.audio_out.value = processed_audio_np.astype(np.float32)
 
-# --- Класс LFO ---
+# --- Класс LFO (v2 с коннекторами) ---
 class LFO(ControlModule):
-    """Низкочастотный осциллятор (LFO) для генерации управляющих сигналов."""
+    """Низкочастотный осциллятор (LFO) для генерации управляющих сигналов (v2)."""
     def __init__(self, name: str, frequency: float = 1.0, amplitude: float = 1.0, initial_phase_degrees: float = 0.0):
-        """
-        Инициализирует низкочастотный осциллятор (LFO).
-
-        Args:
-            name (str): Имя модуля.
-            frequency (float, optional): Начальная частота LFO в Гц. Defaults to 1.0.
-            amplitude (float, optional): Начальная амплитуда выходного сигнала LFO. Defaults to 1.0.
-            initial_phase_degrees (float, optional): Начальная фаза LFO в градусах. Defaults to 0.0.
-        """
+        """Инициализирует LFO."""
         super().__init__(name)
-        self._frequency = frequency  # Частота LFO в Гц
-        self._amplitude = amplitude  # Амплитуда выходного сигнала LFO
-        self._current_phase_rad = math.radians(initial_phase_degrees)  # Внутренняя текущая фаза в радианах
+        self.frequency_in = InputConnector(name='frequency', module_owner=self, default_value=frequency, modulation_type=ModulationType.REPLACE)
+        self.amplitude_in = InputConnector(name='amplitude', module_owner=self, default_value=amplitude, modulation_type=ModulationType.REPLACE)
+        self.value_out = OutputConnector(name='value', module_owner=self)
+        self.value_out.value = np.zeros(0, dtype=np.float32)
         
-        # Выход 'value' уже инициализирован в ControlModule как 0.0
-        # Мы будем обновлять его массивом в process_block
-        self.outputs['value'] = np.zeros(0, dtype=np.float32)
-
-
-    @property
-    def frequency(self) -> float:
-        """Частота LFO в Герцах."""
-        return self._frequency
-
-    @frequency.setter
-    def frequency(self, value: float):
-        self._frequency = float(value)
-
-    @property
-    def amplitude(self) -> float:
-        """Амплитуда выходного сигнала LFO (обычно от 0.0 до 1.0, но может быть и больше/меньше)."""
-        return self._amplitude
-
-    @amplitude.setter
-    def amplitude(self, value: float):
-        self._amplitude = float(value)
+        self._current_phase_rad = math.radians(initial_phase_degrees)
+        self._initial_phase_degrees = initial_phase_degrees # Сохраняем для property
 
     @property
     def initial_phase_degrees(self) -> float:
         """Начальная фаза LFO в градусах. Установка этого значения сбрасывает текущую фазу."""
-        # Возвращаем текущую фазу, преобразованную в градусы, как представление начальной/текущей точки.
-        # Это свойство, по сути, позволяет "перезапустить" LFO с новой фазы.
-        return math.degrees(self._current_phase_rad)
-
+        return self._initial_phase_degrees
     @initial_phase_degrees.setter
     def initial_phase_degrees(self, value: float):
-        # При изменении начальной фазы, сбрасываем текущую фазу на это значение
-        self._current_phase_rad = math.radians(value)
+        self._initial_phase_degrees = float(value)
+        self._current_phase_rad = math.radians(self._initial_phase_degrees)
+
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """
-        Генерирует блок управляющего сигнала LFO (синусоида).
-        Обновляет внутреннюю фазу для обеспечения непрерывности сигнала между блоками.
-        """
-        # Для LFO параметры frequency и amplitude пока не модулируются другими сигналами,
-        # а берутся из его собственных свойств.
-        # В будущем можно добавить входы 'frequency_in', 'amplitude_in'.
-        current_lfo_freq = self._frequency
-        current_lfo_amplitude = self._amplitude
+        """Генерирует блок управляющего сигнала LFO (синусоида)."""
+        freq_values = self.frequency_in.get_value(num_samples, sample_rate)
+        amp_values = self.amplitude_in.get_value(num_samples, sample_rate)
+        
+        current_lfo_freq = freq_values[0]
+        current_lfo_amplitude = amp_values[0]
 
         output_block = np.zeros(num_samples, dtype=np.float32)
         phase_step = (2 * math.pi * current_lfo_freq) / sample_rate
-        
         current_phase = self._current_phase_rad
         for i in range(num_samples):
             output_block[i] = current_lfo_amplitude * math.sin(current_phase)
             current_phase += phase_step
-        
-        self._current_phase_rad = current_phase % (2 * math.pi) # Сохраняем и нормализуем фазу для следующего блока
+        self._current_phase_rad = current_phase % (2 * math.pi)
+        self.value_out.value = output_block
 
-        self.outputs['value'] = output_block
-
-# --- Класс ADSR Envelope ---
+# --- Класс ADSR Envelope (v2 с коннекторами) ---
 class ADSREnvelope(ControlModule):
-    """
-    Генерирует ADSR-огибающую (Attack, Decay, Sustain, Release).
-    Управляется через методы trigger_on() и trigger_off().
-    Выходной сигнал ('value') находится в диапазоне от 0.0 до 1.0.
-    """
-    def __init__(self, name: str, 
-                 attack_time_sec: float = 0.1, 
-                 decay_time_sec: float = 0.1, 
-                 sustain_level: float = 0.7, 
-                 release_time_sec: float = 0.5):
-        """
-        Инициализирует ADSR-огибающую.
-
-        Args:
-            name (str): Имя модуля.
-            attack_time_sec (float, optional): Время атаки в секундах. Defaults to 0.1.
-            decay_time_sec (float, optional): Время спада в секундах. Defaults to 0.1.
-            sustain_level (float, optional): Уровень поддержки (0.0 до 1.0). Defaults to 0.7.
-            release_time_sec (float, optional): Время затухания в секундах. Defaults to 0.5.
-        """
+    """Генерирует ADSR-огибающую (v2). Параметры A,D,S,R устанавливаются через properties."""
+    def __init__(self, name: str, attack_time_sec: float = 0.1, decay_time_sec: float = 0.1, sustain_level: float = 0.7, release_time_sec: float = 0.5):
+        """Инициализирует ADSR-огибающую."""
         super().__init__(name)
-        
-        self.attack_time_sec = max(0.001, attack_time_sec) 
-        self.decay_time_sec = max(0.001, decay_time_sec)
-        self.sustain_level = np.clip(sustain_level, 0.0, 1.0)
-        self.release_time_sec = max(0.001, release_time_sec)
+        self.value_out = OutputConnector(name='value', module_owner=self)
+        self.value_out.value = np.zeros(0, dtype=np.float32)
+
+        self._attack_time_sec = max(0.001, attack_time_sec) 
+        self._decay_time_sec = max(0.001, decay_time_sec)
+        self._sustain_level = np.clip(sustain_level, 0.0, 1.0)
+        self._release_time_sec = max(0.001, release_time_sec)
 
         self._state = EnvelopeState.IDLE
         self._current_level = 0.0
         self._gate_is_on = False 
 
-        self.outputs['value'] = np.zeros(0, dtype=np.float32)
-
     @property
-    def attack_time(self) -> float: 
-        """Время атаки в секундах."""
-        return self.attack_time_sec
+    def attack_time(self) -> float: """Время атаки в секундах."""
+        return self._attack_time_sec
     @attack_time.setter
-    def attack_time(self, value: float): self.attack_time_sec = max(0.001, value)
+    def attack_time(self, value: float): self._attack_time_sec = max(0.001, value)
 
     @property
-    def decay_time(self) -> float: 
-        """Время спада до уровня поддержки в секундах."""
-        return self.decay_time_sec
+    def decay_time(self) -> float: """Время спада до уровня поддержки в секундах."""
+        return self._decay_time_sec
     @decay_time.setter
-    def decay_time(self, value: float): self.decay_time_sec = max(0.001, value)
+    def decay_time(self, value: float): self._decay_time_sec = max(0.001, value)
 
     @property
-    def sustain(self) -> float: 
-        """Уровень поддержки (0.0 до 1.0)."""
-        return self.sustain_level
+    def sustain(self) -> float: """Уровень поддержки (0.0 до 1.0)."""
+        return self._sustain_level
     @sustain.setter
-    def sustain(self, value: float): self.sustain_level = np.clip(value, 0.0, 1.0)
+    def sustain(self, value: float): self._sustain_level = np.clip(value, 0.0, 1.0)
     
     @property
-    def release_time(self) -> float: 
-        """Время затухания (после отпускания клавиши) в секундах."""
-        return self.release_time_sec
+    def release_time(self) -> float: """Время затухания (после отпускания клавиши) в секундах."""
+        return self._release_time_sec
     @release_time.setter
-    def release_time(self, value: float): self.release_time_sec = max(0.001, value)
+    def release_time(self, value: float): self._release_time_sec = max(0.001, value)
 
     def trigger_on(self):
-        """
-        Запускает огибающую (эквивалент нажатия клавиши).
-        Переводит огибающую в состояние ATTACK.
-        """
+        """Запускает огибающую (эквивалент нажатия клавиши)."""
         self._gate_is_on = True
         self._state = EnvelopeState.ATTACK
-        # При re-trigger можно сбросить _current_level, если это нужно для звука.
-        # self._current_level = 0.0 # Опционально, для "жесткого" перезапуска атаки
 
     def trigger_off(self):
-        """
-        Инициирует фазу затухания Release (эквивалент отпускания клавиши).
-        Переводит огибающую в состояние RELEASE, если она не в IDLE.
-        """
+        """Инициирует фазу затухания Release (эквивалент отпускания клавиши)."""
         self._gate_is_on = False
-        if self._state != EnvelopeState.IDLE:
-             self._state = EnvelopeState.RELEASE
+        if self._state != EnvelopeState.IDLE: self._state = EnvelopeState.RELEASE
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """
-        Генерирует блок значений огибающей ADSR.
-        Каждый сэмпл в блоке рассчитывается в соответствии с текущим состоянием
-        огибающей (ATTACK, DECAY, SUSTAIN, RELEASE, IDLE) и ее параметрами.
-        """
+        """Генерирует блок значений огибающей ADSR."""
         output_block = np.zeros(num_samples, dtype=np.float32)
-        
-        # TODO: Параметры A, D, S, R могут быть модулируемыми через входы.
-        # Пока используются значения из свойств.
-
         for i in range(num_samples):
-            if self._state == EnvelopeState.IDLE:
-                self._current_level = 0.0
-            
+            if self._state == EnvelopeState.IDLE: self._current_level = 0.0
             elif self._state == EnvelopeState.ATTACK:
-                attack_samples = self.attack_time_sec * sample_rate
-                if attack_samples == 0:
-                    self._current_level = 1.0
-                else:
-                    # Линейный рост от текущего уровня до 1.0
-                    # Если _current_level = 0, increment = 1.0 / attack_samples
-                    increment = (1.0 - self._current_level) / (attack_samples * (1.0 - self._current_level + 1e-9) + 1e-9) # Более общий случай
-                    # Упрощенный, если атака всегда с нуля или почти с нуля:
-                    # increment = 1.0 / (attack_samples + 1e-9) 
-                    self._current_level += increment
-                
-                if self._current_level >= 1.0:
-                    self._current_level = 1.0
-                    self._state = EnvelopeState.DECAY
-            
+                attack_samples = self._attack_time_sec * sample_rate
+                increment = (1.0 - self._current_level) / (attack_samples * (1.0 - self._current_level + 1e-9) + 1e-9) if attack_samples > 0 else 1.0
+                self._current_level += increment
+                if self._current_level >= 1.0: self._current_level = 1.0; self._state = EnvelopeState.DECAY
             elif self._state == EnvelopeState.DECAY:
-                decay_samples = self.decay_time_sec * sample_rate
-                if decay_samples == 0:
-                    self._current_level = self.sustain_level
-                else:
-                    if self._current_level > self.sustain_level:
-                        # Линейный спад от текущего уровня до sustain_level
-                        decrement = (self._current_level - self.sustain_level) / (decay_samples + 1e-9)
-                        self._current_level -= decrement
-                    else: # Если уже ниже или равен sustain (например, из-за очень короткой атаки)
-                        self._current_level = self.sustain_level
-
-                if self._current_level <= self.sustain_level:
-                    self._current_level = self.sustain_level
-                    self._state = EnvelopeState.SUSTAIN
-            
-            elif self._state == EnvelopeState.SUSTAIN:
-                self._current_level = self.sustain_level
-                if not self._gate_is_on: 
-                    self._state = EnvelopeState.RELEASE
-            
-            elif self._state == EnvelopeState.RELEASE:
-                release_samples = self.release_time_sec * sample_rate
-                if release_samples == 0:
-                    self._current_level = 0.0
-                else:
-                    # Линейный спад от текущего уровня до 0.0
-                    decrement = self._current_level / (release_samples + 1e-9)
+                decay_samples = self._decay_time_sec * sample_rate
+                if self._current_level > self._sustain_level:
+                    decrement = (self._current_level - self._sustain_level) / (decay_samples + 1e-9) if decay_samples > 0 else (self._current_level - self._sustain_level)
                     self._current_level -= decrement
-
-                if self._current_level <= 0.0:
-                    self._current_level = 0.0
-                    self._state = EnvelopeState.IDLE
-            
+                if self._current_level <= self._sustain_level: self._current_level = self._sustain_level; self._state = EnvelopeState.SUSTAIN
+            elif self._state == EnvelopeState.SUSTAIN:
+                self._current_level = self._sustain_level
+                if not self._gate_is_on: self._state = EnvelopeState.RELEASE
+            elif self._state == EnvelopeState.RELEASE:
+                release_samples = self._release_time_sec * sample_rate
+                decrement = self._current_level / (release_samples + 1e-9) if release_samples > 0 else self._current_level
+                self._current_level -= decrement
+                if self._current_level <= 0.0: self._current_level = 0.0; self._state = EnvelopeState.IDLE
             output_block[i] = self._current_level
-        
-        self.outputs['value'] = output_block.astype(np.float32)
+        self.value_out.value = output_block
 
-# --- Класс SignalScalerOffset ---
+# --- Класс SignalScalerOffset (v2 с коннекторами) ---
 class SignalScalerOffset(ControlModule):
-    """
-    Масштабирует и смещает входной управляющий сигнал.
-    Формула: Output = (Input * Scale) + Offset.
-    """
+    """Масштабирует и смещает входной управляющий сигнал (v2)."""
     def __init__(self, name: str, scale: float = 1.0, offset: float = 0.0):
-        """
-        Инициализирует модуль масштабирования и смещения сигнала.
-
-        Args:
-            name (str): Имя модуля.
-            scale (float, optional): Коэффициент масштабирования. Defaults to 1.0.
-            offset (float, optional): Значение смещения. Defaults to 0.0.
-        """
+        """Инициализирует модуль масштабирования и смещения сигнала."""
         super().__init__(name)
-        self._scale = scale
-        self._offset = offset
-        # self.inputs['input_signal'] будет использоваться по соглашению для основного входа
-        # self.inputs['scale_in'] и self.inputs['offset_in'] - возможные будущие входы для модуляции scale/offset
-        
-        self.outputs['value'] = np.zeros(0, dtype=np.float32) # Выходной сигнал
-
-    @property
-    def scale(self) -> float:
-        """Коэффициент масштабирования, применяемый к входному сигналу."""
-        return self._scale
-
-    @scale.setter
-    def scale(self, value: float):
-        self._scale = float(value)
-
-    @property
-    def offset(self) -> float:
-        """Значение смещения, добавляемое к масштабированному сигналу."""
-        return self._offset
-
-    @offset.setter
-    def offset(self, value: float):
-        self._offset = float(value)
+        self.input_signal_in = InputConnector(name='input_signal', module_owner=self, default_value=0.0, modulation_type=ModulationType.REPLACE)
+        self.scale_in = InputConnector(name='scale', module_owner=self, default_value=scale, modulation_type=ModulationType.REPLACE)
+        self.offset_in = InputConnector(name='offset', module_owner=self, default_value=offset, modulation_type=ModulationType.REPLACE)
+        self.value_out = OutputConnector(name='value', module_owner=self)
+        self.value_out.value = np.zeros(0, dtype=np.float32)
 
     def process_block(self, num_samples: int, sample_rate: int):
-        """
-        Обрабатывает блок, применяя масштабирование и смещение к входному сигналу ('input_signal').
-        Параметры 'scale' и 'offset' пока берутся из свойств, но в будущем могут управляться через входы.
-        """
-        # Получаем входной сигнал
-        # Если к 'input_signal' ничего не подключено, он будет блоком нулей (или другого default_value из get_input_value)
-        input_block = self.get_input_value('input_signal', num_samples, sample_rate, default_value=0.0)
+        """Обрабатывает блок, применяя масштабирование и смещение."""
+        input_block = self.input_signal_in.get_value(num_samples, sample_rate)
+        scale_values = self.scale_in.get_value(num_samples, sample_rate)
+        offset_values = self.offset_in.get_value(num_samples, sample_rate)
         
-        # Параметры scale и offset пока берутся из свойств.
-        # В будущем их тоже можно сделать управляемыми через входы:
-        # current_scale = self.get_input_value('scale_in', num_samples, sample_rate, default_value=self._scale)
-        # current_offset = self.get_input_value('offset_in', num_samples, sample_rate, default_value=self._offset)
-        current_scale = self._scale
-        current_offset = self._offset
+        # Используем поэлементные операции, если scale/offset являются массивами (например, от LFO)
+        # или скалярные, если они постоянны (get_value вернет растянутый массив)
+        output_block = (input_block * scale_values) + offset_values
+        self.value_out.value = output_block.astype(np.float32)
 
-        # Убедимся, что input_block является NumPy массивом для операций
-        if not isinstance(input_block, np.ndarray):
-            input_block = np.full(num_samples, float(input_block))
-        elif input_block.size == 1 and num_samples > 1 : # Если input_block - скаляр в массиве
-            input_block = np.full(num_samples, input_block.item())
-        elif input_block.size != num_samples:
-            # Если размеры не совпадают, это проблема. Пока заполним значением по умолчанию (или первым элементом).
-            # print(f"Предупреждение (SignalScalerOffset {self.name}): размер входного блока {input_block.size} не совпадает с num_samples {num_samples}")
-            default_fill_value = input_block[0] if input_block.size > 0 else 0.0
-            input_block = np.full(num_samples, default_fill_value)
-
-
-        # Выполняем операцию
-        output_block = (input_block * current_scale) + current_offset
-        
-        self.outputs['value'] = output_block.astype(np.float32)
 ```
