@@ -167,3 +167,4 @@ class SoundGraph:
         print("Рендеринг завершен.")
         return _numpy_to_segment(final_output_accumulator, sample_rate)
 
+```

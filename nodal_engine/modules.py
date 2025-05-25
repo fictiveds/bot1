@@ -399,20 +399,4 @@ class SignalScalerOffset(ControlModule):
         output_block = (input_block * scale_values) + offset_values
         self.value_out.value = output_block.astype(np.float32)
 
-
-        # Убедимся, что input_block является NumPy массивом для операций
-        if not isinstance(input_block, np.ndarray):
-            input_block = np.full(num_samples, float(input_block))
-        elif input_block.size == 1 and num_samples > 1 : # Если input_block - скаляр в массиве
-            input_block = np.full(num_samples, input_block.item())
-        elif input_block.size != num_samples:
-            # Если размеры не совпадают, это проблема. Пока заполним значением по умолчанию (или первым элементом).
-            # print(f"Предупреждение (SignalScalerOffset {self.name}): размер входного блока {input_block.size} не совпадает с num_samples {num_samples}")
-            default_fill_value = input_block[0] if input_block.size > 0 else 0.0
-            input_block = np.full(num_samples, default_fill_value)
-
-
-        # Выполняем операцию
-        output_block = (input_block * current_scale) + current_offset
-        
-        self.outputs['value'] = output_block.astype(np.float32)
+```
