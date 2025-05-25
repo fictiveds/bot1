@@ -170,18 +170,24 @@ class FilterEffect(AudioModule):
         self.audio_out.value = np.zeros(0, dtype=np.float32)
 
     @property
-    def filter_type(self) -> str: """Тип фильтра ('lowpass' или 'highpass')."""
+    def filter_type(self) -> str:
+        """Тип фильтра ('lowpass' или 'highpass')."""
         return self._filter_type
+
     @filter_type.setter
     def filter_type(self, value: str):
-        if value not in ['lowpass', 'highpass']: raise ValueError("filter_type должен быть 'lowpass' или 'highpass'")
+        if value not in ['lowpass', 'highpass']:
+            raise ValueError("filter_type должен быть 'lowpass' или 'highpass'")
         self._filter_type = value
         
     @property
-    def order(self) -> int: """Порядок фильтра."""
+    def order(self) -> int:
+        """Порядок фильтра."""
         return self._order
+
     @order.setter
-    def order(self, value: int): self._order = int(value)
+    def order(self, value: int):
+        self._order = int(value)
 
     def process_block(self, num_samples: int, sample_rate: int):
         """Обрабатывает блок аудио, применяя эффект фильтрации."""
